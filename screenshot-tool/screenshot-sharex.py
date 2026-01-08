@@ -54,23 +54,23 @@ def install_dependencies(quiet: bool = False) -> bool:
         print("Installing required dependencies...")
         print(f"Packages: {', '.join(REQUIRED_PACKAGES)}")
         print()
-
+    
     try:
         # Use the same Python interpreter that's running this script
         python_exe = sys.executable
-
+        
         # Install packages
         cmd = [python_exe, "-m", "pip", "install", "--upgrade"] + REQUIRED_PACKAGES
-
+        
         if quiet:
             cmd.append("--quiet")
-
+        
         result = subprocess.run(
             cmd,
             capture_output=not quiet,
             text=True
         )
-
+        
         if result.returncode == 0:
             if not quiet:
                 print("\n✓ Dependencies installed successfully!")
@@ -81,7 +81,7 @@ def install_dependencies(quiet: bool = False) -> bool:
                 print(f"\n✗ Failed to install dependencies:")
                 print(result.stderr)
             return False
-
+            
     except Exception as e:
         if not quiet:
             print(f"\n✗ Error installing dependencies: {e}")
@@ -102,7 +102,7 @@ def prompt_install() -> bool:
     print()
     print(f"Python: {sys.executable}")
     print()
-
+    
     # Check if running interactively
     if sys.stdin.isatty():
         try:
@@ -138,7 +138,7 @@ if "--check-installed" in sys.argv:
     print("Checking PyObjC installation status...")
     print(f"Python: {sys.executable}")
     print()
-
+    
     packages_status = []
     for pkg in ["objc", "Quartz", "AppKit", "Foundation"]:
         try:
@@ -146,11 +146,11 @@ if "--check-installed" in sys.argv:
             packages_status.append((pkg, "✓ OK"))
         except ImportError as e:
             packages_status.append((pkg, f"✗ {e}"))
-
+    
     print("Package status:")
     for pkg, status in packages_status:
         print(f"  {pkg}: {status}")
-
+    
     all_ok = all("OK" in status for _, status in packages_status)
     sys.exit(0 if all_ok else 1)
 
@@ -272,7 +272,7 @@ if _import_error:
         packages_installed = result.returncode == 0 and "ok" in result.stdout
     except Exception:
         packages_installed = False
-
+    
     if packages_installed:
         # Packages are installed but import failed - likely sandbox issue
         print("=" * 60)
@@ -335,32 +335,32 @@ def check_accessibility_permissions() -> bool:
             print("Or run this command to open the settings directly:")
             print('  open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"')
             print()
-
+            
             # Try multiple methods to open System Settings
             opened = False
-
+            
             # Method 1: Direct URL scheme (macOS Ventura+)
             if not opened:
                 result = os.system('open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility" 2>/dev/null')
                 if result == 0:
                     opened = True
-
+            
             # Method 2: System Preferences app (older macOS)
             if not opened:
                 result = os.system('open "/System/Applications/System Preferences.app" 2>/dev/null')
                 if result == 0:
                     opened = True
-
+            
             # Method 3: System Settings app (macOS Ventura+)
             if not opened:
                 os.system('open "/System/Applications/System Settings.app" 2>/dev/null')
-
+            
             # Request access (may show system prompt on some macOS versions)
             try:
                 CGRequestListenEventAccess()
             except Exception:
                 pass
-
+            
             return False
         return True
     except Exception as e:
@@ -377,50 +377,54 @@ class ScreenshotApp:
         self.save_to_disk = save_to_disk
         self.app = NSApplication.sharedApplication()
         self.app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
-
+        
         self.windows: List[WindowInfo] = []
         self.highlighted_window: Optional[WindowInfo] = None
         self.highlighted_element: Optional[UIElementInfo] = None
         self.is_dragging = False
         self.drag_start: Optional[Tuple[float, float]] = None
         self.drag_current: Optional[Tuple[float, float]] = None
-        # Modes: "auto" = smart (element > window, drag for region), "window", "element", "region"
+        # Modes: "auto" (default, smart), "window", "element", "region"
         self.capture_mode = "auto"
         self._annotation_active = False
         self.should_quit = False
         self.captured = False
-
+        
         # Event monitoring
         self.event_tap = None
         self.event_monitor = None
         self.local_monitor = None
         self._debug = os.environ.get('DEBUG', '0') == '1'
-
+        
+        # Throttling for mouse move (accessibility API is slow)
+        self._last_mouse_update = 0
+        self._mouse_throttle_ms = 50  # Only update every 50ms
+        
         # System-wide accessibility element
         self.system_wide_element = AXUIElementCreateSystemWide()
-
+        
         if self._debug:
             print(f"System-wide AX element: {self.system_wide_element}")
-
+        
         # Create overlay windows for each screen
         self.overlay_windows = []
         self.overlay_views = []
         self._create_overlays()
-
+        
         # Refresh window list
         self._refresh_windows()
-
+        
         # Set up event monitoring
         self._setup_event_monitors()
-
+    
     def _create_overlays(self):
         """Create transparent overlay windows for each screen."""
         print(f"Creating overlays for {len(NSScreen.screens())} screen(s)...")
-
+        
         for i, screen in enumerate(NSScreen.screens()):
             frame = screen.frame()
             print(f"  Screen {i}: {frame.size.width}x{frame.size.height} at ({frame.origin.x}, {frame.origin.y})")
-
+            
             # Create overlay window
             window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
                 frame,
@@ -437,47 +441,47 @@ class ScreenshotApp:
             window.setAcceptsMouseMovedEvents_(True)
             window.setHasShadow_(False)
             window.setCollectionBehavior_(1 << 6)  # NSWindowCollectionBehaviorCanJoinAllSpaces
-
+            
             # Create custom view
             view = OverlayView.alloc().initWithFrame_(NSMakeRect(0, 0, frame.size.width, frame.size.height))
             view.app = self
             window.setContentView_(view)
-
+            
             window.makeKeyAndOrderFront_(None)
-
+            
             self.overlay_windows.append(window)
             self.overlay_views.append(view)
-
+        
         print(f"  Created {len(self.overlay_windows)} overlay window(s)")
-
+    
     def _refresh_windows(self):
         """Refresh the list of on-screen windows."""
         self.windows = []
-
+        
         options = kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements
         window_list = CGWindowListCopyWindowInfo(options, kCGNullWindowID)
-
+        
         if window_list:
             for window_info in window_list:
                 # Skip our own overlay windows
                 owner = window_info.get('kCGWindowOwnerName', '')
                 if owner == 'Python' or owner == 'python3':
                     continue
-
+                
                 # Get window bounds
                 bounds_dict = window_info.get('kCGWindowBounds', {})
                 if not bounds_dict:
                     continue
-
+                
                 x = bounds_dict.get('X', 0)
                 y = bounds_dict.get('Y', 0)
                 width = bounds_dict.get('Width', 0)
                 height = bounds_dict.get('Height', 0)
-
+                
                 # Skip tiny windows
                 if width < 10 or height < 10:
                     continue
-
+                
                 window = WindowInfo(
                     window_id=window_info.get('kCGWindowNumber', 0),
                     owner_name=owner,
@@ -486,17 +490,17 @@ class ScreenshotApp:
                     layer=window_info.get('kCGWindowLayer', 0)
                 )
                 self.windows.append(window)
-
+    
     def _setup_event_monitors(self):
         """Set up global event monitors using CGEventTap for reliable key capture."""
         print("Setting up event monitors...")
-
+        
         debug = os.environ.get('DEBUG', '0') == '1'
         self._debug = debug
-
+        
         # Store reference to self for the callback
         app_ref = self
-
+        
         # CGEventTap callback
         def cg_event_callback(proxy, event_type, event, refcon):
             try:
@@ -521,7 +525,7 @@ class ScreenshotApp:
 
                     # Space key (keycode 49) - cycle through modes
                     elif keycode == 49:
-                        modes = ["auto", "window", "element", "region"]
+                        modes = ["auto", "window", "element"]
                         current_idx = modes.index(app_ref.capture_mode) if app_ref.capture_mode in modes else 0
                         app_ref.capture_mode = modes[(current_idx + 1) % len(modes)]
                         mode_names = {"auto": "Auto (Smart)", "window": "Window Only", "element": "Element Only", "region": "Region Only"}
@@ -549,7 +553,7 @@ class ScreenshotApp:
                 traceback.print_exc()
 
             return event
-
+        
         # Create event mask for the events we want to capture
         event_mask = (
             CGEventMaskBit(kCGEventKeyDown) |
@@ -558,7 +562,7 @@ class ScreenshotApp:
             CGEventMaskBit(kCGEventMouseMoved) |
             CGEventMaskBit(kCGEventLeftMouseDragged)
         )
-
+        
         # Create the event tap
         self.event_tap = CGEventTapCreate(
             kCGSessionEventTap,      # Tap at session level
@@ -568,21 +572,21 @@ class ScreenshotApp:
             cg_event_callback,
             None  # User info
         )
-
+        
         if self.event_tap:
             print("  CGEventTap: OK")
-
+            
             # Create a run loop source and add it to the current run loop
             run_loop_source = CFMachPortCreateRunLoopSource(None, self.event_tap, 0)
             CFRunLoopAddSource(CFRunLoopGetCurrent(), run_loop_source, kCFRunLoopCommonModes)
-
+            
             # Enable the tap
             CGEventTapEnable(self.event_tap, True)
             print("  Event tap enabled")
         else:
             print("  CGEventTap: FAILED")
             print("  ⚠️  Make sure you have granted Accessibility permissions!")
-
+            
         # Also set up NSEvent monitors as backup for mouse movement
         mask = 0xFFFFFFFF
         self._ns_mask = mask
@@ -605,7 +609,7 @@ class ScreenshotApp:
         self.local_monitor = NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
             mask, ns_event_handler
         )
-
+        
         if self.event_monitor:
             print("  NSEvent global monitor: OK")
         if self.local_monitor:
@@ -658,25 +662,47 @@ class ScreenshotApp:
 
     def _handle_mouse_move(self, event):
         """Handle mouse movement."""
+        import time
+        
         location = NSEvent.mouseLocation()
         screen_y = self._flip_y(location.y)
-
+        
         if self.is_dragging:
             self.drag_current = (location.x, screen_y)
+            self._update_overlays()
+            return
+        
+        # Throttle expensive operations (accessibility API is slow)
+        current_time = time.time() * 1000  # ms
+        
+        # Use different throttle rates: window mode is fast, element modes are slow
+        needs_element_detection = self.capture_mode in ("auto", "element")
+        throttle_ms = 100 if needs_element_detection else 16  # 100ms for element, ~60fps for window
+        
+        if current_time - self._last_mouse_update < throttle_ms:
+            return
+        self._last_mouse_update = current_time
+        
+        if self.capture_mode == "window":
+            # Window mode is fast - just iterate the window list
+            self._find_window_at(location.x, screen_y)
+            self.highlighted_element = None
+            
+            if self.highlighted_window and self._debug:
+                print(f"Window: {self.highlighted_window.owner_name}")
         elif self.capture_mode == "auto":
-            # Auto mode: find both element and window
+            # Auto mode: find both element and window (slow due to accessibility API)
             self._find_element_at(location.x, screen_y)
             self._find_window_at(location.x, screen_y)
-
+            
             # Only prefer element if it's significantly smaller than the window
-            # (i.e., it's actually a sub-element, not the window itself)
             if self.highlighted_element and self.highlighted_window:
                 elem_bounds = self.highlighted_element.bounds
                 win_bounds = self.highlighted_window.bounds
-
+                
                 elem_area = elem_bounds[2] * elem_bounds[3]
                 win_area = win_bounds[2] * win_bounds[3]
-
+                
                 # If element is more than 80% of window size, it's probably the window itself
                 if win_area > 0 and elem_area / win_area > 0.8:
                     self.highlighted_element = None  # Treat as window instead
@@ -688,48 +714,41 @@ class ScreenshotApp:
                 if self.highlighted_window:
                     print(f"Auto: Window - {self.highlighted_window.owner_name}")
         elif self.capture_mode == "element":
-            # Find UI element under cursor
+            # Element mode (slow due to accessibility API)
             self._find_element_at(location.x, screen_y)
             self._find_window_at(location.x, screen_y)
-
+            
             if self._debug and self.highlighted_element:
                 print(f"Element: {self.highlighted_element.role} - {self.highlighted_element.title}")
-        elif self.capture_mode == "window":
-            # Find window under cursor
-            self._find_window_at(location.x, screen_y)
-            self.highlighted_element = None  # Clear element in window-only mode
-
-            if self.highlighted_window and self._debug:
-                print(f"Window: {self.highlighted_window.owner_name}")
         elif self.capture_mode == "region":
             # Region mode - clear highlights, only drag works
             self.highlighted_element = None
             self.highlighted_window = None
-
+        
         self._update_overlays()
-
+    
     def _handle_mouse_down(self, event):
         """Handle mouse down - start drag for region selection."""
         location = NSEvent.mouseLocation()
-
+        
         # In all modes, mouse down starts a potential drag for region selection
         # If user just clicks (no drag), we'll capture on mouse up
         self.is_dragging = True
         self.drag_start = (location.x, self._flip_y(location.y))
         self.drag_current = self.drag_start
-
+    
     def _handle_mouse_up(self, event):
         """Handle mouse up - complete capture."""
         captured = False
-
+        
         if self.is_dragging and self.drag_start and self.drag_current:
             x1, y1 = self.drag_start
             x2, y2 = self.drag_current
-
+            
             # Calculate drag distance
             width = abs(x2 - x1)
             height = abs(y2 - y1)
-
+            
             # If dragged more than 10 pixels, treat as region selection
             if width > 10 or height > 10:
                 if width > 5 and height > 5:
@@ -737,7 +756,7 @@ class ScreenshotApp:
                     y = min(y1, y2)
                     self._capture_region(x, y, width, height)
                     captured = True
-
+        
         # If not a drag (just a click), capture highlighted item
         if not captured:
             if self.capture_mode == "auto":
@@ -751,25 +770,25 @@ class ScreenshotApp:
             elif self.capture_mode == "window" and self.highlighted_window:
                 self._capture_window(self.highlighted_window)
             # Region mode only captures via drag, clicks do nothing
-
+        
         self.is_dragging = False
         self.drag_start = None
         self.drag_current = None
-
+    
     def _find_window_at(self, x: float, y: float):
         """Find the window at the given screen coordinates."""
         self.highlighted_window = None
-
+        
         for window in self.windows:
             wx, wy, ww, wh = window.bounds
             if wx <= x <= wx + ww and wy <= y <= wy + wh:
                 self.highlighted_window = window
                 break
-
+    
     def _find_element_at(self, x: float, y: float):
         """Find the UI element at the given screen coordinates using Accessibility API."""
         self.highlighted_element = None
-
+        
         try:
             # Get the element at this position
             # Try different calling conventions for AXUIElementCopyElementAtPosition
@@ -780,7 +799,7 @@ class ScreenshotApp:
                     float(x), float(y),
                     None
                 )
-
+                
                 if isinstance(result, tuple) and len(result) == 2:
                     error, element = result
                 elif isinstance(result, int):
@@ -789,7 +808,7 @@ class ScreenshotApp:
                 else:
                     error = -1
                     element = result
-
+                    
             except TypeError:
                 # Method 2: element passed as byref
                 from ctypes import c_void_p, byref
@@ -800,43 +819,80 @@ class ScreenshotApp:
                     byref(element_ptr)
                 )
                 element = element_ptr.value
-
+            
             if error != kAXErrorSuccess or element is None:
                 return
-
+            
             # Get element attributes
             role = self._get_ax_attribute(element, kAXRoleAttribute) or "Unknown"
+            
+            # Filter to only useful UI elements (skip text-level elements)
+            # These are structural/interactive elements worth highlighting
+            USEFUL_ROLES = {
+                # Interactive elements
+                "AXButton", "AXCheckBox", "AXRadioButton", "AXSlider",
+                "AXTextField", "AXTextArea", "AXComboBox", "AXPopUpButton",
+                "AXLink", "AXMenuButton", "AXDisclosureTriangle",
+                # Tab/navigation
+                "AXTab", "AXTabGroup", "AXToolbar", "AXNavigationBar",
+                # Menus
+                "AXMenu", "AXMenuItem", "AXMenuBar", "AXMenuBarItem",
+                # Containers/structural
+                "AXGroup", "AXScrollArea", "AXSplitGroup", "AXSplitter",
+                "AXSheet", "AXDrawer", "AXPopover",
+                # Lists/tables
+                "AXTable", "AXRow", "AXCell", "AXList", "AXOutline", "AXOutlineRow",
+                "AXBrowser", "AXColumn",
+                # Other useful
+                "AXImage", "AXProgressIndicator", "AXBusyIndicator",
+                "AXColorWell", "AXDateField", "AXWebArea",
+            }
+            
+            # Skip text-level elements (too granular)
+            SKIP_ROLES = {
+                "AXStaticText", "AXHeading", "AXParagraph",
+                "AXLine", "AXWord", "AXCharacter",
+                "AXUnknown", "AXApplication", "AXWindow",  # Too broad
+            }
+            
+            if role in SKIP_ROLES:
+                return
+            
+            # If not in useful roles and not explicitly skipped, still allow if it's a reasonable container
+            if role not in USEFUL_ROLES and not role.startswith("AX"):
+                return
+            
             title = self._get_ax_attribute(element, kAXTitleAttribute) or ""
-
+            
             # Get position and size
             position = self._get_ax_attribute(element, kAXPositionAttribute)
             size = self._get_ax_attribute(element, kAXSizeAttribute)
-
-
+            
+            
             if position is not None and size is not None:
                 # Extract values from AXValue objects using Quartz functions
                 try:
                     from Quartz import AXValueGetValue, kAXValueTypeCGPoint, kAXValueTypeCGSize
                     from Quartz import CGPoint, CGSize
-
+                    
                     # Create mutable structures to receive the values
                     point = CGPoint()
                     size_val = CGSize()
-
+                    
                     # Extract point
                     if AXValueGetValue(position, kAXValueTypeCGPoint, point):
                         pos_x = point.x
                         pos_y = point.y
                     else:
                         pos_x, pos_y = self._parse_ax_value(position)
-
+                    
                     # Extract size
                     if AXValueGetValue(size, kAXValueTypeCGSize, size_val):
                         width = size_val.width
                         height = size_val.height
                     else:
                         width, height = self._parse_ax_value(size)
-
+                        
                 except ImportError:
                     # Fallback to parsing
                     pos_x, pos_y = self._parse_ax_value(position)
@@ -846,12 +902,12 @@ class ScreenshotApp:
                         print(f"AXValue extraction error: {e}")
                     pos_x, pos_y = self._parse_ax_value(position)
                     width, height = self._parse_ax_value(size)
-
+                
                 if self._debug:
                     print(f"Parsed: pos=({pos_x}, {pos_y}), size=({width}, {height})")
-
-                # Only highlight if element has reasonable size
-                if width > 5 and height > 5:
+                
+                # Only highlight if element has reasonable size (min 20x20 to skip tiny elements)
+                if width > 20 and height > 15:
                     self.highlighted_element = UIElementInfo(
                         role=role,
                         title=title,
@@ -863,35 +919,35 @@ class ScreenshotApp:
                 print(f"Element detection error: {e}")
                 import traceback
                 traceback.print_exc()
-
+    
     def _parse_ax_value(self, value):
         """Parse position or size from AXValue string representation."""
         import re
         val_str = str(value)
-
+        
         # Try different formats
         # Format: "x:123.0 y:456.0" or "w:100.0 h:200.0"
         xy_match = re.search(r'x:([\d.-]+).*y:([\d.-]+)', val_str)
         if xy_match:
             return float(xy_match.group(1)), float(xy_match.group(2))
-
+        
         wh_match = re.search(r'w:([\d.-]+).*h:([\d.-]+)', val_str)
         if wh_match:
             return float(wh_match.group(1)), float(wh_match.group(2))
-
+        
         # Format: "{123, 456}" (CGPoint/CGSize)
         cg_match = re.search(r'\{([\d.-]+),\s*([\d.-]+)\}', val_str)
         if cg_match:
             return float(cg_match.group(1)), float(cg_match.group(2))
-
+        
         return 0, 0
-
+    
     def _get_ax_attribute(self, element, attribute):
         """Get an accessibility attribute value from an element."""
         try:
             # Try calling AXUIElementCopyAttributeValue
             result = AXUIElementCopyAttributeValue(element, attribute, None)
-
+            
             # Handle different return formats
             if isinstance(result, tuple):
                 error = result[0]
@@ -900,55 +956,55 @@ class ScreenshotApp:
                 # Might just return the value directly
                 error = kAXErrorSuccess
                 value = result
-
+            
             if error == kAXErrorSuccess and value is not None:
                 return value
-
+                
             if self._debug and attribute in (kAXPositionAttribute, kAXSizeAttribute):
                 print(f"  _get_ax_attribute({attribute}): error={error}, result type={type(result)}")
-
+                
         except Exception as e:
             if self._debug:
                 print(f"  _get_ax_attribute({attribute}) exception: {e}")
         return None
-
+    
     def _flip_y(self, y: float) -> float:
         """Convert from NSScreen coordinates (bottom-left origin) to CGWindow coordinates (top-left origin)."""
         main_screen = NSScreen.mainScreen()
         if main_screen:
             return main_screen.frame().size.height - y
         return y
-
+    
     def _update_overlays(self):
         """Request redraw of all overlay views."""
         for view in self.overlay_views:
             view.setNeedsDisplay_(True)
-
+    
     def _capture_window(self, window: WindowInfo):
         """Capture a specific window."""
         x, y, width, height = window.bounds
         self._capture_region(x, y, width, height, window_id=window.window_id)
-
+    
     def _capture_element(self, element: UIElementInfo):
         """Capture a specific UI element."""
         x, y, width, height = element.bounds
         # Capture as a region (elements don't have window IDs)
         self._capture_region(x, y, width, height)
-
+    
     def _capture_region(self, x: float, y: float, width: float, height: float, window_id: int = 0):
         """Capture a screen region and copy to clipboard."""
         # Hide overlays before capture
         for window in self.overlay_windows:
             window.orderOut_(None)
-
+        
         # Small delay to ensure overlays are hidden
         NSRunLoop.currentRunLoop().runUntilDate_(
             NSDate.dateWithTimeIntervalSinceNow_(0.1)
         )
-
+        
         # Capture the region
         rect = CGRectMake(x, y, width, height)
-
+        
         if window_id:
             # Capture specific window only (not what's behind it)
             image = CGWindowListCreateImage(
@@ -965,23 +1021,23 @@ class ScreenshotApp:
                 kCGNullWindowID,
                 kCGWindowImageDefault
             )
-
+        
         if image:
             # Convert CGImage to NSImage
             ns_image = NSImage.alloc().initWithCGImage_size_(image, NSMakeSize(width, height))
-
+            
             # Save to temp file
             temp_dir = tempfile.gettempdir()
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             temp_path = os.path.join(temp_dir, f"screenshot_{timestamp}.png")
-
+            
             # Get PNG data
             tiff_data = ns_image.TIFFRepresentation()
             if tiff_data:
                 from AppKit import NSBitmapImageRep
                 bitmap_rep = NSBitmapImageRep.imageRepWithData_(tiff_data)
                 png_data = bitmap_rep.representationUsingType_properties_(4, None)  # 4 = NSPNGFileType
-
+                
                 if png_data:
                     png_data.writeToFile_atomically_(temp_path, True)
 
@@ -1015,10 +1071,10 @@ class ScreenshotApp:
                         os.remove(temp_path)
                     except:
                         pass
-
+        
         self.captured = True
         self.should_quit = True
-
+    
     def _is_shottr_installed(self) -> bool:
         """Check if Shottr is installed."""
         shottr_paths = [
@@ -1026,41 +1082,41 @@ class ScreenshotApp:
             os.path.expanduser("~/Applications/Shottr.app"),
         ]
         return any(os.path.exists(p) for p in shottr_paths)
-
+    
     def _install_shottr(self) -> bool:
         """Attempt to install Shottr via Homebrew."""
         from AppKit import NSAlert
-
+        
         # Check if Homebrew is installed
         brew_installed = os.path.exists("/opt/homebrew/bin/brew") or os.path.exists("/usr/local/bin/brew")
-
+        
         if not brew_installed:
             alert = NSAlert.alloc().init()
             alert.setMessageText_("Shottr Not Installed")
             alert.setInformativeText_("Shottr is not installed and Homebrew is not available for automatic installation.\n\nPlease install manually from: https://shottr.cc/")
             alert.addButtonWithTitle_("Open Website")
             alert.addButtonWithTitle_("Use Preview Instead")
-
+            
             if alert.runModal() == 1000:  # First button
                 os.system('open "https://shottr.cc/"')
             return False
-
+        
         # Ask user if they want to install
         alert = NSAlert.alloc().init()
         alert.setMessageText_("Install Shottr?")
         alert.setInformativeText_("Shottr is a free screenshot annotation tool that's much better than Preview.\n\nWould you like to install it now via Homebrew?\n\n(This may take a minute)")
         alert.addButtonWithTitle_("Install Shottr")
         alert.addButtonWithTitle_("Use Preview Instead")
-
+        
         if alert.runModal() != 1000:  # Not first button
             return False
-
+        
         print("Installing Shottr via Homebrew...")
         result = os.system("brew install --cask shottr")
-
+        
         if result == 0 and self._is_shottr_installed():
             print("✓ Shottr installed successfully!")
-
+            
             # Show success message
             alert = NSAlert.alloc().init()
             alert.setMessageText_("Shottr Installed!")
@@ -1076,28 +1132,28 @@ class ScreenshotApp:
             alert.addButtonWithTitle_("OK")
             alert.runModal()
             return False
-
+    
     def _annotate_image(self, filepath: str):
         """Open image in Shottr (or Preview as fallback) for annotation."""
         from AppKit import NSAlert
-
+        
         # Check if Shottr is installed, offer to install if not
         if not self._is_shottr_installed():
             if not self._install_shottr():
                 # User declined or install failed, use Preview
                 print("Using Preview for annotations...")
                 os.system(f'open -a Preview "{filepath}"')
-
+                
                 alert = NSAlert.alloc().init()
                 alert.setMessageText_("Annotation Mode (Preview)")
                 alert.setInformativeText_("Make your annotations in Preview, then save (⌘S) and click OK.")
                 alert.addButtonWithTitle_("OK")
                 alert.addButtonWithTitle_("Cancel")
                 alert.runModal()
-
+                
                 os.system('osascript -e \'tell application "Preview" to close front document saving no\' 2>/dev/null')
                 return
-
+        
         # DISABLE event monitoring during annotation to prevent clicks from triggering capture
         print("Pausing event monitoring for annotation...")
         self._annotation_active = True
@@ -1124,7 +1180,7 @@ class ScreenshotApp:
             while time.time() - start_time < 300:  # 5 minute timeout
                 # Process pending events (required for clipboard updates when running from Alfred)
                 NSRunLoop.currentRunLoop().runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.1))
-
+                
                 # Check if clipboard changed (indicating Shottr saved)
                 current_count = pasteboard.changeCount()
                 if current_count != initial_clipboard_count:
@@ -1154,14 +1210,14 @@ class ScreenshotApp:
             print("Resuming event monitoring...")
             self._annotation_active = False
             self._enable_event_monitoring()
-
+    
     def _get_next_screenshot_number(self, screenshots_dir: str) -> int:
         """Find the next available sequential number for screenshots in the directory."""
         import re
-
+        
         max_num = 0
         pattern = re.compile(r'^screenshot-(\d+)\.png$')
-
+        
         if os.path.exists(screenshots_dir):
             for filename in os.listdir(screenshots_dir):
                 match = pattern.match(filename)
@@ -1169,7 +1225,7 @@ class ScreenshotApp:
                     num = int(match.group(1))
                     if num > max_num:
                         max_num = num
-
+        
         return max_num + 1
 
     def _save_to_disk(self, filepath: str):
@@ -1254,15 +1310,15 @@ class ScreenshotApp:
     def _show_notification(self, message: str):
         """Show a system notification."""
         os.system(f'osascript -e \'display notification "{message}" with title "Screenshot"\'')
-
+    
     def run(self, timeout: float = 30.0):
         """Run the application with optional timeout.
-
+        
         Args:
             timeout: Maximum seconds to wait before auto-exit (default 30s, 0 = no timeout)
         """
         import time
-
+        
         print("\n" + "=" * 50)
         print("ShareX Screenshot Tool")
         print("=" * 50)
@@ -1273,29 +1329,29 @@ class ScreenshotApp:
         print("  - Move mouse to highlight (element if found, else window)")
         print("  - Click to capture highlighted item")
         print("  - Drag to select a custom region")
-        print("  - Space to cycle mode: Auto → Window → Element → Region")
+        print("  - Space to cycle mode: Auto → Window → Element")
         print("  - Escape to cancel")
         print("=" * 50)
         print()
-
+        
         # Activate app
         self.app.activateIgnoringOtherApps_(True)
-
+        
         start_time = time.time()
-
+        
         # Run loop
         while not self.should_quit:
             NSRunLoop.currentRunLoop().runUntilDate_(
                 NSDate.dateWithTimeIntervalSinceNow_(0.016)  # ~60fps
             )
-
+            
             # Check timeout
             if timeout > 0:
                 elapsed = time.time() - start_time
                 if elapsed >= timeout:
                     print(f"\nTimeout after {timeout} seconds. Exiting...")
                     self.should_quit = True
-
+        
         # Cleanup
         print("Cleaning up...")
 
@@ -1310,34 +1366,34 @@ class ScreenshotApp:
 
 class OverlayView(NSView):
     """Custom view for drawing the overlay."""
-
+    
     app = None
-
+    
     def drawRect_(self, rect):
         """Draw the overlay."""
         if not self.app:
             return
-
+        
         # Get drawing context
         context = NSGraphicsContext.currentContext()
         if not context:
             return
-
+        
         # Clear background
         NSColor.clearColor().set()
         NSBezierPath.fillRect_(self.bounds())
-
+        
         # Draw semi-transparent overlay
         overlay_color = NSColor.colorWithCalibratedRed_green_blue_alpha_(0, 0, 0, 0.3)
         overlay_color.set()
         NSBezierPath.fillRect_(self.bounds())
-
+        
         # Get screen info for coordinate conversion
         screen = self.window().screen()
         if not screen:
             return
         screen_frame = screen.frame()
-
+        
         # Draw highlighted window, element, or drag region
         if self.app.is_dragging and self.app.drag_start and self.app.drag_current:
             # Check if actually dragging (moved more than a few pixels)
@@ -1350,104 +1406,104 @@ class OverlayView(NSView):
                 self._draw_highlight_for_mode(screen_frame)
         else:
             self._draw_highlight_for_mode(screen_frame)
-
+        
         # Draw mode indicator
         self._draw_mode_indicator()
-
+        
         # Draw instructions
         self._draw_instructions()
-
+    
     def _draw_highlighted_window(self, screen_frame):
         """Draw highlight around the selected window."""
         window = self.app.highlighted_window
         wx, wy, ww, wh = window.bounds
-
+        
         # Convert coordinates (CGWindow uses top-left, NSView uses bottom-left)
         view_x = wx - screen_frame.origin.x
         view_y = screen_frame.size.height - wy - wh - screen_frame.origin.y
-
+        
         window_rect = NSMakeRect(view_x, view_y, ww, wh)
-
+        
         # Clear the window area (make it transparent)
         NSColor.clearColor().set()
         NSBezierPath.fillRect_(window_rect)
-
+        
         # Draw border (bright blue for windows)
         border_color = NSColor.colorWithCalibratedRed_green_blue_alpha_(0.0, 0.5, 1.0, 1.0)
         border_color.set()
         border_path = NSBezierPath.bezierPathWithRect_(window_rect)
         border_path.setLineWidth_(4.0)
         border_path.stroke()
-
+        
         # Draw window info label
         info_text = f"{window.owner_name}"
         if window.window_name:
             info_text += f" - {window.window_name}"
-
+        
         self._draw_label(info_text, view_x, view_y + wh + 5)
-
+    
     def _draw_highlighted_element(self, screen_frame):
         """Draw highlight around the selected UI element."""
         element = self.app.highlighted_element
         ex, ey, ew, eh = element.bounds
-
+        
         # Convert coordinates (Accessibility uses top-left, NSView uses bottom-left)
         view_x = ex - screen_frame.origin.x
         view_y = screen_frame.size.height - ey - eh - screen_frame.origin.y
-
+        
         element_rect = NSMakeRect(view_x, view_y, ew, eh)
-
+        
         # Clear the element area (make it transparent)
         NSColor.clearColor().set()
         NSBezierPath.fillRect_(element_rect)
-
+        
         # Draw border (bright green for elements)
         border_color = NSColor.colorWithCalibratedRed_green_blue_alpha_(0.0, 0.9, 0.3, 1.0)
         border_color.set()
         border_path = NSBezierPath.bezierPathWithRect_(element_rect)
         border_path.setLineWidth_(3.0)
         border_path.stroke()
-
+        
         # Draw element info label
         role_name = element.role.replace("AX", "")  # Remove AX prefix for readability
         info_text = role_name
         if element.title:
             info_text += f": {element.title}"
-
+        
         self._draw_label(info_text, view_x, view_y + eh + 5)
-
+    
     def _draw_drag_region(self, screen_frame):
         """Draw the drag selection region."""
         x1, y1 = self.app.drag_start
         x2, y2 = self.app.drag_current
-
+        
         # Calculate bounds
         x = min(x1, x2) - screen_frame.origin.x
         y = screen_frame.size.height - max(y1, y2)
         width = abs(x2 - x1)
         height = abs(y2 - y1)
-
+        
         region_rect = NSMakeRect(x, y, width, height)
-
+        
         # Clear the region (make it transparent)
         NSColor.clearColor().set()
         NSBezierPath.fillRect_(region_rect)
-
+        
         # Draw border
         border_color = NSColor.colorWithCalibratedRed_green_blue_alpha_(1.0, 0.4, 0.2, 1.0)
         border_color.set()
         border_path = NSBezierPath.bezierPathWithRect_(region_rect)
         border_path.setLineWidth_(2.0)
         border_path.stroke()
-
+        
         # Draw dimensions
         dim_text = f"{int(width)} × {int(height)}"
         self._draw_label(dim_text, x, y + height + 5)
-
+    
     def _draw_highlight_for_mode(self, screen_frame):
         """Draw the appropriate highlight based on current mode."""
         mode = self.app.capture_mode
-
+        
         if mode == "auto":
             # Auto mode: prefer element, fall back to window
             if self.app.highlighted_element:
@@ -1461,7 +1517,7 @@ class OverlayView(NSView):
             if self.app.highlighted_window:
                 self._draw_highlighted_window(screen_frame)
         # Region mode doesn't draw highlights (only drag region)
-
+    
     def _draw_mode_indicator(self):
         """Draw the current mode indicator."""
         mode_names = {
@@ -1471,13 +1527,13 @@ class OverlayView(NSView):
             "region": "Region Only"
         }
         mode_text = mode_names.get(self.app.capture_mode, "Unknown Mode")
-
+        
         # Draw background
         bg_rect = NSMakeRect(10, self.bounds().size.height - 40, 130, 30)
         bg_color = NSColor.colorWithCalibratedRed_green_blue_alpha_(0, 0, 0, 0.7)
         bg_color.set()
         NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(bg_rect, 5, 5).fill()
-
+        
         # Draw text
         text_color = NSColor.whiteColor()
         attrs = {
@@ -1486,11 +1542,11 @@ class OverlayView(NSView):
         }
         attr_string = NSAttributedString.alloc().initWithString_attributes_(mode_text, attrs)
         attr_string.drawAtPoint_(NSMakePoint(20, self.bounds().size.height - 32))
-
+    
     def _draw_instructions(self):
         """Draw usage instructions."""
         instructions = "Click: Capture  |  Drag: Select region  |  Space: Cycle mode  |  Esc: Cancel"
-
+        
         # Draw background
         text_width = 580
         bg_rect = NSMakeRect(
@@ -1502,7 +1558,7 @@ class OverlayView(NSView):
         bg_color = NSColor.colorWithCalibratedRed_green_blue_alpha_(0, 0, 0, 0.7)
         bg_color.set()
         NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(bg_rect, 5, 5).fill()
-
+        
         # Draw text
         text_color = NSColor.colorWithCalibratedRed_green_blue_alpha_(0.8, 0.8, 0.8, 1.0)
         attrs = {
@@ -1511,13 +1567,13 @@ class OverlayView(NSView):
         }
         attr_string = NSAttributedString.alloc().initWithString_attributes_(instructions, attrs)
         attr_string.drawAtPoint_(NSMakePoint(bg_rect.origin.x + 10, 15))
-
+    
     def _draw_label(self, text: str, x: float, y: float):
         """Draw a label at the given position."""
         # Truncate long text
         if len(text) > 50:
             text = text[:47] + "..."
-
+        
         # Calculate text size
         attrs = {
             NSFontAttributeName: NSFont.boldSystemFontOfSize_(11),
@@ -1525,7 +1581,7 @@ class OverlayView(NSView):
         }
         attr_string = NSAttributedString.alloc().initWithString_attributes_(text, attrs)
         text_size = attr_string.size()
-
+        
         # Draw background
         padding = 4
         bg_rect = NSMakeRect(
@@ -1537,13 +1593,13 @@ class OverlayView(NSView):
         bg_color = NSColor.colorWithCalibratedRed_green_blue_alpha_(0, 0, 0, 0.8)
         bg_color.set()
         NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(bg_rect, 3, 3).fill()
-
+        
         # Draw text
         attr_string.drawAtPoint_(NSMakePoint(x, y))
-
+    
     def acceptsFirstResponder(self):
         return True
-
+    
     def canBecomeKeyView(self):
         return True
 
@@ -1599,31 +1655,30 @@ Examples:
         action='store_true',
         help='Install required PyObjC dependencies and exit'
     )
-
+    
     args = parser.parse_args()
-
+    
     # Check accessibility permissions
     if not check_accessibility_permissions():
         print("\n❌ Cannot run without accessibility permissions.")
         print("   Please grant permission and try again.")
         sys.exit(1)
-
+    
     print("✓ Accessibility permissions OK")
-
+    
     # Check for Shift key if requested
     annotate = args.annotate
     if args.check_shift and not annotate:
         annotate = check_shift_pressed()
         if annotate:
             print("Shift key detected - annotation mode enabled")
-
+    
     # Run the app
     app = ScreenshotApp(annotate=annotate, save_to_disk=not args.no_save)
     success = app.run(timeout=args.timeout)
-
+    
     sys.exit(0 if success else 1)
 
 
 if __name__ == '__main__':
     main()
-
