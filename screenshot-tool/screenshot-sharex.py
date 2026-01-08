@@ -30,132 +30,27 @@ import sys
 import subprocess
 import tempfile
 from datetime import datetime
-from typing import Optional, Tuple, List, NamedTuple
+from typing import Optional, Tuple, List
 
-# Required packages for PyObjC
-REQUIRED_PACKAGES = [
-    "pyobjc-core",
-    "pyobjc-framework-Quartz",
-    "pyobjc-framework-Cocoa",
-]
+# Import utilities from lib/
+from lib.models import WindowInfo, UIElementInfo
+from lib.utils import (
+    show_notification,
+    get_screenshots_dir,
+    get_next_screenshot_number,
+    get_next_recording_number,
+    generate_screenshot_path,
+    generate_recording_path,
+)
+from lib.dependencies import (
+    handle_early_flags,
+    handle_import_error,
+    check_accessibility_permissions,
+    install_dependencies,
+)
 
-
-def check_dependencies() -> bool:
-    """Check if all required dependencies are installed."""
-    try:
-        import objc
-        import Quartz
-        import AppKit
-        return True
-    except ImportError:
-        return False
-
-
-def install_dependencies(quiet: bool = False) -> bool:
-    """Install required dependencies using pip."""
-    if not quiet:
-        print("Installing required dependencies...")
-        print(f"Packages: {', '.join(REQUIRED_PACKAGES)}")
-        print()
-    
-    try:
-        # Use the same Python interpreter that's running this script
-        python_exe = sys.executable
-        
-        # Install packages
-        cmd = [python_exe, "-m", "pip", "install", "--upgrade"] + REQUIRED_PACKAGES
-        
-        if quiet:
-            cmd.append("--quiet")
-        
-        result = subprocess.run(
-            cmd,
-            capture_output=not quiet,
-            text=True
-        )
-        
-        if result.returncode == 0:
-            if not quiet:
-                print("\n✓ Dependencies installed successfully!")
-                print("  Please re-run the script to use it.")
-            return True
-        else:
-            if not quiet:
-                print(f"\n✗ Failed to install dependencies:")
-                print(result.stderr)
-            return False
-            
-    except Exception as e:
-        if not quiet:
-            print(f"\n✗ Error installing dependencies: {e}")
-        return False
-
-
-def prompt_install() -> bool:
-    """Prompt user to install dependencies."""
-    print("=" * 60)
-    print("ShareX-style Screenshot Tool - Dependency Setup")
-    print("=" * 60)
-    print()
-    print("This tool requires PyObjC frameworks to access macOS APIs.")
-    print()
-    print("Required packages:")
-    for pkg in REQUIRED_PACKAGES:
-        print(f"  • {pkg}")
-    print()
-    print(f"Python: {sys.executable}")
-    print()
-    
-    # Check if running interactively
-    if sys.stdin.isatty():
-        try:
-            response = input("Install now? [Y/n]: ").strip().lower()
-            if response in ('', 'y', 'yes'):
-                return install_dependencies()
-            else:
-                print("\nTo install manually, run:")
-                print(f"  {sys.executable} -m pip install {' '.join(REQUIRED_PACKAGES)}")
-                print("\nOr run this script with --install flag:")
-                print(f"  {sys.argv[0]} --install")
-                return False
-        except (EOFError, KeyboardInterrupt):
-            print("\nInstallation cancelled.")
-            return False
-    else:
-        # Non-interactive mode
-        print("Run with --install flag to install dependencies:")
-        print(f"  {sys.argv[0]} --install")
-        print()
-        print("Or install manually:")
-        print(f"  {sys.executable} -m pip install {' '.join(REQUIRED_PACKAGES)}")
-        return False
-
-
-# Check for --install flag early (before importing PyObjC)
-if "--install" in sys.argv:
-    success = install_dependencies()
-    sys.exit(0 if success else 1)
-
-# Check for --check-installed flag for debugging
-if "--check-installed" in sys.argv:
-    print("Checking PyObjC installation status...")
-    print(f"Python: {sys.executable}")
-    print()
-    
-    packages_status = []
-    for pkg in ["objc", "Quartz", "AppKit", "Foundation"]:
-        try:
-            __import__(pkg)
-            packages_status.append((pkg, "✓ OK"))
-        except ImportError as e:
-            packages_status.append((pkg, f"✗ {e}"))
-    
-    print("Package status:")
-    for pkg, status in packages_status:
-        print(f"  {pkg}: {status}")
-    
-    all_ok = all("OK" in status for _, status in packages_status)
-    sys.exit(0 if all_ok else 1)
+# Handle --install and --check-installed flags early (before importing PyObjC)
+handle_early_flags()
 
 # Try to import PyObjC modules
 _import_error = None
@@ -264,112 +159,13 @@ except ImportError as e:
 
 # Handle import failure
 if _import_error:
-    # Check if packages are actually installed (might be a sandbox/permission issue)
-    try:
-        result = subprocess.run(
-            [sys.executable, "-c", "import objc; print('ok')"],
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-        packages_installed = result.returncode == 0 and "ok" in result.stdout
-    except Exception:
-        packages_installed = False
-    
-    if packages_installed:
-        # Packages are installed but import failed - likely sandbox issue
-        print("=" * 60)
-        print("ERROR: PyObjC packages are installed but cannot be loaded")
-        print("=" * 60)
-        print()
-        print(f"Import error: {_import_error}")
-        print()
-        print("This usually happens when running in a sandboxed environment")
-        print("(like Cursor's terminal) that restricts native library loading.")
-        print()
-        print("Try running the script directly from Terminal.app instead:")
-        print(f"  {sys.argv[0]}")
-        print()
-        sys.exit(1)
-    else:
-        # Dependencies not installed - prompt to install
-        if prompt_install():
-            print("\nPlease re-run the script now.")
-        sys.exit(1)
+    handle_import_error(_import_error)
 
 
-class WindowInfo(NamedTuple):
-    """Information about a window."""
-    window_id: int
-    owner_name: str
-    window_name: str
-    bounds: Tuple[float, float, float, float]  # x, y, width, height
-    layer: int
+# WindowInfo and UIElementInfo are imported from lib/models
 
 
-class UIElementInfo(NamedTuple):
-    """Information about a UI element within a window."""
-    role: str  # e.g., "AXButton", "AXTab", "AXTextField"
-    title: str
-    bounds: Tuple[float, float, float, float]  # x, y, width, height
-    ax_element: object  # The AXUIElement reference
-
-
-def check_accessibility_permissions() -> bool:
-    """Check if the app has accessibility permissions for event monitoring."""
-    try:
-        # Try the Quartz method first (more reliable)
-        if not CGPreflightListenEventAccess():
-            print("\n" + "=" * 60)
-            print("⚠️  ACCESSIBILITY PERMISSION REQUIRED")
-            print("=" * 60)
-            print()
-            print("This app needs permission to monitor keyboard and mouse events.")
-            print()
-            print("To grant permission:")
-            print("  1. Open System Settings (or System Preferences on older macOS)")
-            print("  2. Go to: Privacy & Security → Accessibility")
-            print("  3. Click the 🔒 lock icon to make changes")
-            print("  4. Click + and add your terminal app (iTerm or Terminal)")
-            print("  5. Make sure the checkbox is ✓ enabled")
-            print("  6. RESTART your terminal app")
-            print("  7. Run this script again")
-            print()
-            print("Or run this command to open the settings directly:")
-            print('  open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"')
-            print()
-            
-            # Try multiple methods to open System Settings
-            opened = False
-            
-            # Method 1: Direct URL scheme (macOS Ventura+)
-            if not opened:
-                result = os.system('open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility" 2>/dev/null')
-                if result == 0:
-                    opened = True
-            
-            # Method 2: System Preferences app (older macOS)
-            if not opened:
-                result = os.system('open "/System/Applications/System Preferences.app" 2>/dev/null')
-                if result == 0:
-                    opened = True
-            
-            # Method 3: System Settings app (macOS Ventura+)
-            if not opened:
-                os.system('open "/System/Applications/System Settings.app" 2>/dev/null')
-            
-            # Request access (may show system prompt on some macOS versions)
-            try:
-                CGRequestListenEventAccess()
-            except Exception:
-                pass
-            
-            return False
-        return True
-    except Exception as e:
-        print(f"Warning: Could not check accessibility permissions: {e}")
-        # Can't check, let's try to continue anyway
-        return True
+# check_accessibility_permissions is imported from lib/dependencies
 
 
 class ScreenshotApp:
@@ -1238,42 +1034,16 @@ class ScreenshotApp:
     
     def _get_next_screenshot_number(self, screenshots_dir: str) -> int:
         """Find the next available sequential number for screenshots in the directory."""
-        import re
-        
-        max_num = 0
-        pattern = re.compile(r'^screenshot-(\d+)\.png$')
-        
-        if os.path.exists(screenshots_dir):
-            for filename in os.listdir(screenshots_dir):
-                match = pattern.match(filename)
-                if match:
-                    num = int(match.group(1))
-                    if num > max_num:
-                        max_num = num
-        
-        return max_num + 1
+        return get_next_screenshot_number(screenshots_dir)
 
     def _save_to_disk(self, filepath: str):
         """Save screenshot to ~/Screenshots/YYYY/MMM/ folder structure."""
-        import datetime
         import shutil
 
         try:
-            # Get current date
-            now = datetime.datetime.now()
-            year = now.strftime("%Y")
-            month = now.strftime("%B")  # January, February, March, etc.
-
-            # Create folder path
-            screenshots_dir = os.path.expanduser(f"~/Screenshots/{year}/{month}")
-
-            # Create directories if they don't exist
-            os.makedirs(screenshots_dir, exist_ok=True)
-
-            # Generate sequential filename
-            next_num = self._get_next_screenshot_number(screenshots_dir)
-            filename = f"screenshot-{next_num}.png"
-            dest_path = os.path.join(screenshots_dir, filename)
+            # Get screenshots directory and generate path
+            screenshots_dir = get_screenshots_dir()
+            dest_path = generate_screenshot_path(screenshots_dir)
 
             # Copy the file
             shutil.copy2(filepath, dest_path)
@@ -1334,9 +1104,7 @@ class ScreenshotApp:
 
     def _show_notification(self, message: str):
         """Show a system notification."""
-        # Escape single quotes in the message for AppleScript
-        safe_message = message.replace("'", "'\\''")
-        os.system(f'osascript -e \'display notification "{safe_message}" with title "Screenshot"\'')
+        show_notification(message)
     
     # ============================================================
     # RECORDING FUNCTIONALITY (for --record mode)
@@ -1616,19 +1384,10 @@ class ScreenshotApp:
         
         print("Converting to GIF...")
         
-        # Generate output path
-        import datetime
-        now = datetime.datetime.now()
-        year = now.strftime("%Y")
-        month = now.strftime("%B")
-        
-        screenshots_dir = os.path.expanduser(f"~/Screenshots/{year}/{month}")
-        os.makedirs(screenshots_dir, exist_ok=True)
-        
-        # Find next number
-        next_num = self._get_next_recording_number(screenshots_dir)
-        gif_filename = f"recording-{next_num}.gif"
-        gif_path = os.path.join(screenshots_dir, gif_filename)
+        # Generate output path using library functions
+        screenshots_dir = get_screenshots_dir()
+        gif_path = generate_recording_path(screenshots_dir)
+        gif_filename = os.path.basename(gif_path)
         
         # Get recording dimensions
         width = int(self._recording_bounds[2]) if self._recording_bounds else 640
@@ -1682,20 +1441,7 @@ class ScreenshotApp:
     
     def _get_next_recording_number(self, screenshots_dir: str) -> int:
         """Find the next available sequential number for recordings."""
-        import re
-        
-        max_num = 0
-        pattern = re.compile(r'^recording-(\d+)\.gif$')
-        
-        if os.path.exists(screenshots_dir):
-            for filename in os.listdir(screenshots_dir):
-                match = pattern.match(filename)
-                if match:
-                    num = int(match.group(1))
-                    if num > max_num:
-                        max_num = num
-        
-        return max_num + 1
+        return get_next_recording_number(screenshots_dir)
     
     def _copy_gif_to_clipboard(self, gif_path: str):
         """Copy GIF file to clipboard using osascript (most reliable method)."""
