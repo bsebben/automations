@@ -7,10 +7,12 @@ Features:
 - Region selection with crosshairs
 - Optional annotation in Preview
 - Copy to clipboard
+- Screen recording to GIF
 
 Usage:
     python screenshot-sharex.py              # Normal mode
     python screenshot-sharex.py --annotate   # With annotation
+    python screenshot-sharex.py --record     # Record to GIF
     python screenshot-sharex.py --install    # Install dependencies
 
 Controls:
@@ -19,6 +21,7 @@ Controls:
     - Hold and drag to select custom region
     - Press Space to toggle between window/region mode
     - Press Escape to cancel
+    - Press ⌘. (Cmd+Period) to stop recording
 """
 
 import argparse
@@ -372,9 +375,10 @@ def check_accessibility_permissions() -> bool:
 class ScreenshotApp:
     """Main screenshot application."""
 
-    def __init__(self, annotate: bool = False, save_to_disk: bool = True):
+    def __init__(self, annotate: bool = False, save_to_disk: bool = True, record_mode: bool = False):
         self.annotate = annotate
         self.save_to_disk = save_to_disk
+        self.record_mode = record_mode
         self.app = NSApplication.sharedApplication()
         self.app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
         
@@ -399,6 +403,14 @@ class ScreenshotApp:
         # Throttling for mouse move (accessibility API is slow)
         self._last_mouse_update = 0
         self._mouse_throttle_ms = 50  # Only update every 50ms
+        
+        # Recording state (for --record mode)
+        self._recording_process = None
+        self._recording_temp_file = None
+        self._recording_bounds = None
+        self._is_recording = False
+        self._recording_outline_window = None
+        self._stop_dialog_thread = None
         
         # System-wide accessibility element
         self.system_wide_element = AXUIElementCreateSystemWide()
@@ -621,15 +633,23 @@ class ScreenshotApp:
         if self.event_tap:
             try:
                 CGEventTapEnable(self.event_tap, False)
-            except:
+                # Don't set to None - just disable it
+            except Exception:
                 pass
+            self.event_tap = None  # Clear reference after disabling
 
         # Remove NSEvent monitors
         if self.event_monitor:
-            NSEvent.removeMonitor_(self.event_monitor)
+            try:
+                NSEvent.removeMonitor_(self.event_monitor)
+            except Exception:
+                pass
             self.event_monitor = None
         if self.local_monitor:
-            NSEvent.removeMonitor_(self.local_monitor)
+            try:
+                NSEvent.removeMonitor_(self.local_monitor)
+            except Exception:
+                pass
             self.local_monitor = None
 
     def _enable_event_monitoring(self):
@@ -992,7 +1012,12 @@ class ScreenshotApp:
         self._capture_region(x, y, width, height)
     
     def _capture_region(self, x: float, y: float, width: float, height: float, window_id: int = 0):
-        """Capture a screen region and copy to clipboard."""
+        """Capture a screen region and copy to clipboard (or start recording in record mode)."""
+        # If in recording mode, delegate to recording handler
+        if self.record_mode:
+            self._handle_recording_capture(x, y, width, height)
+            return
+        
         # Hide overlays before capture
         for window in self.overlay_windows:
             window.orderOut_(None)
@@ -1309,7 +1334,565 @@ class ScreenshotApp:
 
     def _show_notification(self, message: str):
         """Show a system notification."""
-        os.system(f'osascript -e \'display notification "{message}" with title "Screenshot"\'')
+        # Escape single quotes in the message for AppleScript
+        safe_message = message.replace("'", "'\\''")
+        os.system(f'osascript -e \'display notification "{safe_message}" with title "Screenshot"\'')
+    
+    # ============================================================
+    # RECORDING FUNCTIONALITY (for --record mode)
+    # ============================================================
+    
+    def _check_ffmpeg_installed(self) -> bool:
+        """Check if ffmpeg is installed."""
+        try:
+            result = subprocess.run(
+                ["which", "ffmpeg"],
+                capture_output=True,
+                text=True
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
+    
+    def _install_ffmpeg(self) -> bool:
+        """Prompt to install ffmpeg via Homebrew."""
+        from AppKit import NSAlert
+        
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_("ffmpeg Required")
+        alert.setInformativeText_(
+            "Screen recording requires ffmpeg.\n\n"
+            "Would you like to install it via Homebrew?\n\n"
+            "(This may take a few minutes)"
+        )
+        alert.addButtonWithTitle_("Install ffmpeg")
+        alert.addButtonWithTitle_("Cancel")
+        
+        if alert.runModal() != 1000:
+            return False
+        
+        print("Installing ffmpeg via Homebrew...")
+        result = os.system("brew install ffmpeg")
+        
+        if result == 0 and self._check_ffmpeg_installed():
+            print("✓ ffmpeg installed successfully!")
+            return True
+        else:
+            print("✗ Failed to install ffmpeg")
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_("Installation Failed")
+            alert.setInformativeText_(
+                "Failed to install ffmpeg.\n\n"
+                "Install manually with: brew install ffmpeg"
+            )
+            alert.addButtonWithTitle_("OK")
+            alert.runModal()
+            return False
+    
+    def _get_screen_capture_devices(self):
+        """Get all available screen capture devices with their indices."""
+        import re
+        devices = {}  # screen_number -> device_index
+        try:
+            result = subprocess.run(
+                ["ffmpeg", "-f", "avfoundation", "-list_devices", "true", "-i", ""],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            output = result.stderr
+            
+            for line in output.split('\n'):
+                # Match "[AVFoundation indev @ 0x...] [2] Capture screen 0"
+                match = re.search(r'\[(\d+)\]\s*Capture screen\s*(\d+)', line)
+                if match:
+                    device_index = match.group(1)
+                    screen_number = int(match.group(2))
+                    devices[screen_number] = device_index
+                    print(f"Found Capture screen {screen_number} at device index {device_index}")
+            
+            return devices
+        except Exception as e:
+            print(f"Error listing devices: {e}")
+            return {}
+    
+    def _find_screen_for_point(self, x: float, y: float):
+        """Find which screen contains the given point (in CGWindow coordinates).
+        
+        Returns (screen_index, screen_origin_x, screen_origin_y, scale_factor) or None.
+        """
+        screens = NSScreen.screens()
+        main_screen = NSScreen.mainScreen()
+        main_frame = main_screen.frame()
+        
+        for idx, screen in enumerate(screens):
+            frame = screen.frame()
+            # NSScreen uses bottom-left origin, convert to top-left for comparison
+            screen_y_top = main_frame.size.height - frame.origin.y - frame.size.height
+            
+            # Check if point is within this screen (with some tolerance)
+            if (frame.origin.x <= x < frame.origin.x + frame.size.width and
+                screen_y_top <= y < screen_y_top + frame.size.height):
+                
+                scale = screen.backingScaleFactor()
+                print(f"Point ({x}, {y}) is on screen {idx}: origin=({frame.origin.x}, {screen_y_top}), size={frame.size.width}x{frame.size.height}, scale={scale}")
+                return (idx, frame.origin.x, screen_y_top, scale)
+        
+        # Default to main screen
+        print(f"Point ({x}, {y}) not found on any screen, using main screen")
+        return (0, 0.0, 0.0, main_screen.backingScaleFactor())
+    
+    def _start_recording(self, x: float, y: float, width: float, height: float):
+        """Start screen recording of the specified region."""
+        import time
+        
+        # Check ffmpeg
+        if not self._check_ffmpeg_installed():
+            if not self._install_ffmpeg():
+                self._show_notification("Recording cancelled - ffmpeg not installed")
+                return False
+        
+        # Create temp file for recording
+        temp_dir = tempfile.gettempdir()
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self._recording_temp_file = os.path.join(temp_dir, f"recording_{timestamp}.mov")
+        self._recording_bounds = (x, y, width, height)
+        
+        # Find which screen the selection is on
+        screen_info = self._find_screen_for_point(x, y)
+        if not screen_info:
+            print("✗ Could not determine screen for selection")
+            self._show_notification("Recording failed - could not find screen")
+            return False
+        
+        screen_idx, screen_origin_x, screen_origin_y, scale_factor = screen_info
+        
+        # Get capture device for this screen
+        devices = self._get_screen_capture_devices()
+        if screen_idx not in devices:
+            # Fall back to screen 0
+            print(f"No capture device for screen {screen_idx}, using screen 0")
+            screen_idx = 0
+            screen_origin_x = 0
+            screen_origin_y = 0
+        
+        if screen_idx not in devices:
+            print("✗ No screen capture devices found")
+            self._show_notification("Recording failed - no screen capture device found")
+            return False
+        
+        screen_device = devices[screen_idx]
+        print(f"Using screen capture device: {screen_device} (screen {screen_idx})")
+        print(f"Screen scale factor: {scale_factor}")
+        
+        # Convert coordinates to be relative to the target screen
+        relative_x = x - screen_origin_x
+        relative_y = y - screen_origin_y
+        
+        print(f"Screen-relative coords: ({relative_x}, {relative_y})")
+        
+        # Scale coordinates for Retina displays
+        scaled_x = int(relative_x * scale_factor)
+        scaled_y = int(relative_y * scale_factor)
+        scaled_width = int(width * scale_factor)
+        scaled_height = int(height * scale_factor)
+        
+        # Ensure width/height are even numbers (required for h264)
+        crop_width = scaled_width // 2 * 2
+        crop_height = scaled_height // 2 * 2
+        crop_x = scaled_x
+        crop_y = scaled_y
+        
+        # Build ffmpeg command for macOS screen capture
+        cmd = [
+            "ffmpeg",
+            "-f", "avfoundation",
+            "-capture_cursor", "1",
+            "-framerate", "30",
+            "-i", f"{screen_device}:none",  # Screen device, no audio
+            "-vf", f"crop={crop_width}:{crop_height}:{crop_x}:{crop_y}",
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-pix_fmt", "yuv420p",
+            "-y",
+            self._recording_temp_file
+        ]
+        
+        print(f"Starting recording: {crop_width}x{crop_height} at ({crop_x}, {crop_y}) [screen-relative, scaled from {int(relative_x)}, {int(relative_y)}]")
+        print(f"Output: {self._recording_temp_file}")
+        
+        try:
+            # Start ffmpeg in background - capture stderr to see errors
+            self._recording_process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                stdin=subprocess.PIPE
+            )
+            self._is_recording = True
+            
+            # Give ffmpeg a moment to start
+            time.sleep(0.5)
+            
+            # Check if ffmpeg is still running
+            if self._recording_process.poll() is not None:
+                # ffmpeg exited immediately - there was an error
+                _, stderr = self._recording_process.communicate()
+                print(f"FFmpeg failed to start:\n{stderr.decode('utf-8', errors='ignore')[-500:]}")
+                self._show_notification("Recording failed - check ffmpeg output")
+                return False
+            
+            # Show notification
+            self._show_notification("Recording started! Click Stop Recording to stop")
+            
+            return True
+            
+        except Exception as e:
+            print(f"Failed to start recording: {e}")
+            self._show_notification(f"Recording failed: {e}")
+            return False
+    
+    def _stop_recording(self):
+        """Stop the current recording and convert to GIF."""
+        if not self._recording_process:
+            return None
+        
+        print("\nStopping recording...")
+        self._is_recording = False
+        
+        # Close recording outline window first (use orderOut to avoid segfault)
+        if self._recording_outline_window:
+            try:
+                self._recording_outline_window.orderOut_(None)
+            except Exception:
+                pass
+            # Don't set to None here - let the caller handle final cleanup
+        
+        # Stop ffmpeg
+        stderr_output = ""
+        try:
+            # Send 'q' to ffmpeg to stop gracefully
+            self._recording_process.stdin.write(b'q')
+            self._recording_process.stdin.flush()
+            _, stderr_output = self._recording_process.communicate(timeout=10)
+            if stderr_output:
+                stderr_output = stderr_output.decode('utf-8', errors='ignore')
+        except subprocess.TimeoutExpired:
+            print("FFmpeg didn't stop gracefully, terminating...")
+            self._recording_process.terminate()
+            try:
+                _, stderr_output = self._recording_process.communicate(timeout=5)
+                if stderr_output:
+                    stderr_output = stderr_output.decode('utf-8', errors='ignore')
+            except Exception:
+                self._recording_process.kill()
+        except Exception as e:
+            print(f"Error stopping ffmpeg: {e}")
+            try:
+                self._recording_process.kill()
+            except Exception:
+                pass
+        
+        self._recording_process = None
+        
+        # Check if recording file exists
+        if not os.path.exists(self._recording_temp_file):
+            print("✗ Recording file not found")
+            if stderr_output:
+                print(f"FFmpeg output:\n{stderr_output[-1000:]}")  # Last 1000 chars
+            self._show_notification("Recording failed - no output file")
+            return None
+        
+        file_size = os.path.getsize(self._recording_temp_file)
+        print(f"✓ Recording saved: {file_size} bytes")
+        
+        # Convert to GIF
+        return self._convert_to_gif()
+    
+    def _convert_to_gif(self) -> Optional[str]:
+        """Convert the recorded video to GIF."""
+        if not self._recording_temp_file or not os.path.exists(self._recording_temp_file):
+            return None
+        
+        print("Converting to GIF...")
+        
+        # Generate output path
+        import datetime
+        now = datetime.datetime.now()
+        year = now.strftime("%Y")
+        month = now.strftime("%B")
+        
+        screenshots_dir = os.path.expanduser(f"~/Screenshots/{year}/{month}")
+        os.makedirs(screenshots_dir, exist_ok=True)
+        
+        # Find next number
+        next_num = self._get_next_recording_number(screenshots_dir)
+        gif_filename = f"recording-{next_num}.gif"
+        gif_path = os.path.join(screenshots_dir, gif_filename)
+        
+        # Get recording dimensions
+        width = int(self._recording_bounds[2]) if self._recording_bounds else 640
+        
+        # Scale down if too large (max 800px width for reasonable GIF size)
+        scale_width = min(width, 800)
+        
+        # Convert using ffmpeg with optimized GIF settings
+        # Two-pass for better quality: generate palette first, then use it
+        palette_file = os.path.join(tempfile.gettempdir(), "palette.png")
+        
+        try:
+            # Pass 1: Generate palette
+            palette_cmd = [
+                "ffmpeg", "-y",
+                "-i", self._recording_temp_file,
+                "-vf", f"fps=15,scale={scale_width}:-1:flags=lanczos,palettegen=stats_mode=diff",
+                palette_file
+            ]
+            subprocess.run(palette_cmd, capture_output=True, check=True)
+            
+            # Pass 2: Create GIF using palette
+            gif_cmd = [
+                "ffmpeg", "-y",
+                "-i", self._recording_temp_file,
+                "-i", palette_file,
+                "-lavfi", f"fps=15,scale={scale_width}:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=5",
+                gif_path
+            ]
+            subprocess.run(gif_cmd, capture_output=True, check=True)
+            
+            print(f"✓ GIF saved to: {gif_path}")
+            
+            # Copy GIF to clipboard (as file reference)
+            self._copy_gif_to_clipboard(gif_path)
+            
+            # Cleanup temp files
+            try:
+                os.remove(self._recording_temp_file)
+                os.remove(palette_file)
+            except Exception:
+                pass
+            
+            self._show_notification(f"Recording saved to {gif_filename}!")
+            return gif_path
+            
+        except subprocess.CalledProcessError as e:
+            print(f"✗ GIF conversion failed: {e}")
+            self._show_notification("GIF conversion failed")
+            return None
+    
+    def _get_next_recording_number(self, screenshots_dir: str) -> int:
+        """Find the next available sequential number for recordings."""
+        import re
+        
+        max_num = 0
+        pattern = re.compile(r'^recording-(\d+)\.gif$')
+        
+        if os.path.exists(screenshots_dir):
+            for filename in os.listdir(screenshots_dir):
+                match = pattern.match(filename)
+                if match:
+                    num = int(match.group(1))
+                    if num > max_num:
+                        max_num = num
+        
+        return max_num + 1
+    
+    def _copy_gif_to_clipboard(self, gif_path: str):
+        """Copy GIF file to clipboard using osascript (most reliable method)."""
+        try:
+            # Check file exists
+            if not os.path.exists(gif_path):
+                print(f"✗ GIF file not found: {gif_path}")
+                return False
+            
+            print(f"Copying to clipboard: {gif_path}")
+            
+            # Use osascript to copy the file to clipboard - this is the most reliable method
+            # It copies as a file reference that can be pasted in Finder, Slack, etc.
+            script = f'''
+                set theFile to POSIX file "{gif_path}"
+                set the clipboard to theFile
+            '''
+            result = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True,
+                text=True
+            )
+            
+            if result.returncode == 0:
+                print("✓ GIF copied to clipboard")
+                return True
+            else:
+                print(f"✗ osascript failed: {result.stderr}")
+                # Fall back to NSImage method
+                return self._copy_gif_to_clipboard_nsimage(gif_path)
+                
+        except Exception as e:
+            print(f"Could not copy to clipboard: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    def _copy_gif_to_clipboard_nsimage(self, gif_path: str):
+        """Fallback: Copy GIF as NSImage to clipboard."""
+        try:
+            from Foundation import NSData
+            
+            # Read the GIF file
+            with open(gif_path, 'rb') as f:
+                gif_bytes = f.read()
+            
+            gif_data = NSData.dataWithBytes_length_(gif_bytes, len(gif_bytes))
+            if not gif_data:
+                print("✗ Could not read GIF file")
+                return False
+            
+            # Create NSImage from GIF data
+            image = NSImage.alloc().initWithData_(gif_data)
+            if not image:
+                print("✗ Could not create image from GIF")
+                return False
+            
+            pasteboard = NSPasteboard.generalPasteboard()
+            pasteboard.clearContents()
+            
+            # Write the image
+            success = pasteboard.writeObjects_([image])
+            
+            if success:
+                print("✓ GIF copied to clipboard (as image)")
+                return True
+            else:
+                print("✗ Failed to write to clipboard")
+                return False
+                
+        except Exception as e:
+            print(f"Fallback clipboard copy failed: {e}")
+            return False
+    
+    def _create_recording_outline(self, x: float, y: float, width: float, height: float):
+        """Create a simple outline window to show the recording region."""
+        # Get main screen for coordinate conversion
+        main_screen = NSScreen.mainScreen()
+        screen_height = main_screen.frame().size.height
+        
+        # Convert from top-left (CGWindow) to bottom-left (NSWindow) coordinates
+        ns_y = screen_height - y - height
+        
+        # Create a borderless window for the outline
+        frame = NSMakeRect(x - 3, ns_y - 3, width + 6, height + 6)
+        
+        outline_window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+            frame,
+            NSBorderlessWindowMask,
+            NSBackingStoreBuffered,
+            False
+        )
+        outline_window.setLevel_(NSStatusWindowLevel + 500)
+        outline_window.setOpaque_(False)
+        outline_window.setBackgroundColor_(NSColor.clearColor())
+        outline_window.setIgnoresMouseEvents_(True)
+        outline_window.setHasShadow_(False)
+        
+        # Create a view that draws the outline
+        view = RecordingOutlineView.alloc().initWithFrame_(NSMakeRect(0, 0, width + 6, height + 6))
+        outline_window.setContentView_(view)
+        outline_window.makeKeyAndOrderFront_(None)
+        
+        return outline_window
+    
+    def _start_stop_dialog_thread(self):
+        """Start a background thread that shows a stop dialog."""
+        import threading
+        
+        def show_dialog():
+            # Use osascript to show a dialog - this is guaranteed to work
+            result = subprocess.run([
+                "osascript", "-e",
+                'display dialog "Recording in progress..." buttons {"Stop Recording"} default button 1 with title "Screen Recording" with icon caution'
+            ], capture_output=True)
+            
+            # When dialog is dismissed (button clicked), stop recording
+            print("\nStop signal received (dialog)")
+            self._is_recording = False
+        
+        # Run in background thread so it doesn't block
+        self._stop_dialog_thread = threading.Thread(target=show_dialog, daemon=True)
+        self._stop_dialog_thread.start()
+    
+    def _handle_recording_capture(self, x: float, y: float, width: float, height: float):
+        """Handle capture in recording mode - start recording instead of screenshot."""
+        # Disable ALL event monitoring during recording (no click/space/mouse events)
+        self._disable_event_monitoring()
+        
+        # Hide selection overlays
+        for window in self.overlay_windows:
+            window.orderOut_(None)
+        
+        # Small delay
+        NSRunLoop.currentRunLoop().runUntilDate_(
+            NSDate.dateWithTimeIntervalSinceNow_(0.1)
+        )
+        
+        # Create recording outline overlay
+        self._recording_outline_window = self._create_recording_outline(x, y, width, height)
+        
+        # Start recording
+        if self._start_recording(x, y, width, height):
+            # Show stop dialog in background thread
+            self._start_stop_dialog_thread()
+            
+            # Enter recording loop - wait for stop signal
+            self._run_recording_loop()
+        
+        # Window cleanup is handled in _stop_recording, just clear the reference
+        self._recording_outline_window = None
+    
+    def _run_recording_loop(self):
+        """Run loop while recording - wait for stop button click."""
+        import time
+        
+        print("\n" + "=" * 50)
+        print("RECORDING IN PROGRESS")
+        print("=" * 50)
+        print("Click the STOP button to stop recording")
+        print("=" * 50 + "\n")
+        
+        # Run loop while recording - just process events and wait for button click
+        start_time = time.time()
+        last_print_time = 0
+        
+        while self._is_recording:
+            # Process Cocoa events (including button clicks)
+            NSRunLoop.currentRunLoop().runUntilDate_(
+                NSDate.dateWithTimeIntervalSinceNow_(0.1)
+            )
+            
+            # Show elapsed time every 5 seconds
+            elapsed = int(time.time() - start_time)
+            if elapsed > 0 and elapsed != last_print_time and elapsed % 5 == 0:
+                print(f"Recording: {elapsed}s elapsed...")
+                last_print_time = elapsed
+        
+        # Small delay before stopping
+        time.sleep(0.2)
+        
+        # Stop recording and convert
+        print("Processing recording...")
+        try:
+            gif_path = self._stop_recording()
+            self.captured = gif_path is not None
+        except Exception as e:
+            print(f"Error during stop: {e}")
+            import traceback
+            traceback.print_exc()
+            self.captured = False
+        
+        self.should_quit = True
+    
+    # ============================================================
+    # END RECORDING FUNCTIONALITY
+    # ============================================================
     
     def run(self, timeout: float = 30.0):
         """Run the application with optional timeout.
@@ -1357,11 +1940,35 @@ class ScreenshotApp:
 
         self._disable_event_monitoring()
 
-        # Close overlay windows
+        # Close overlay windows safely
         for window in self.overlay_windows:
-            window.close()
+            try:
+                window.orderOut_(None)  # Hide first
+            except Exception:
+                pass
+        self.overlay_windows = []
 
         return self.captured
+
+
+class RecordingOutlineView(NSView):
+    """Simple view that draws a red outline for recording region."""
+    
+    def drawRect_(self, rect):
+        """Draw a red outline."""
+        # Clear background
+        NSColor.clearColor().set()
+        NSBezierPath.fillRect_(self.bounds())
+        
+        # Draw red border (3px thick)
+        border_color = NSColor.colorWithCalibratedRed_green_blue_alpha_(1.0, 0.2, 0.2, 0.9)
+        border_color.set()
+        
+        # Inner rect (the actual recording area)
+        inner_rect = NSMakeRect(3, 3, self.bounds().size.width - 6, self.bounds().size.height - 6)
+        border_path = NSBezierPath.bezierPathWithRect_(inner_rect)
+        border_path.setLineWidth_(3.0)
+        border_path.stroke()
 
 
 class OverlayView(NSView):
@@ -1419,8 +2026,12 @@ class OverlayView(NSView):
         wx, wy, ww, wh = window.bounds
         
         # Convert coordinates (CGWindow uses top-left, NSView uses bottom-left)
+        # Need to use main screen height for proper multi-monitor conversion
+        main_screen = NSScreen.mainScreen()
+        main_height = main_screen.frame().size.height
+        
         view_x = wx - screen_frame.origin.x
-        view_y = screen_frame.size.height - wy - wh - screen_frame.origin.y
+        view_y = main_height - wy - wh - screen_frame.origin.y
         
         window_rect = NSMakeRect(view_x, view_y, ww, wh)
         
@@ -1448,8 +2059,12 @@ class OverlayView(NSView):
         ex, ey, ew, eh = element.bounds
         
         # Convert coordinates (Accessibility uses top-left, NSView uses bottom-left)
+        # Need to use main screen height for proper multi-monitor conversion
+        main_screen = NSScreen.mainScreen()
+        main_height = main_screen.frame().size.height
+        
         view_x = ex - screen_frame.origin.x
-        view_y = screen_frame.size.height - ey - eh - screen_frame.origin.y
+        view_y = main_height - ey - eh - screen_frame.origin.y
         
         element_rect = NSMakeRect(view_x, view_y, ew, eh)
         
@@ -1477,11 +2092,22 @@ class OverlayView(NSView):
         x1, y1 = self.app.drag_start
         x2, y2 = self.app.drag_current
         
+        # Get main screen height for coordinate conversion
+        main_screen = NSScreen.mainScreen()
+        main_height = main_screen.frame().size.height
+        
         # Calculate bounds
-        x = min(x1, x2) - screen_frame.origin.x
-        y = screen_frame.size.height - max(y1, y2)
         width = abs(x2 - x1)
         height = abs(y2 - y1)
+        
+        # Get top-left corner in CGWindow coords
+        left = min(x1, x2)
+        top = min(y1, y2)
+        
+        # Convert to view coordinates (bottom-left origin)
+        # Same formula as window/element highlighting
+        x = left - screen_frame.origin.x
+        y = main_height - top - height - screen_frame.origin.y
         
         region_rect = NSMakeRect(x, y, width, height)
         
@@ -1626,6 +2252,7 @@ Examples:
   %(prog)s                  Take screenshot and save to disk
   %(prog)s --annotate       Annotate screenshot and save to disk
   %(prog)s --no-save        Take screenshot for clipboard only
+  %(prog)s --record         Record screen region to GIF
   %(prog)s --install        Install required dependencies
         """
     )
@@ -1655,6 +2282,11 @@ Examples:
         action='store_true',
         help='Install required PyObjC dependencies and exit'
     )
+    parser.add_argument(
+        '--record', '-r',
+        action='store_true',
+        help='Record screen region to GIF instead of taking screenshot'
+    )
     
     args = parser.parse_args()
     
@@ -1674,7 +2306,14 @@ Examples:
             print("Shift key detected - annotation mode enabled")
     
     # Run the app
-    app = ScreenshotApp(annotate=annotate, save_to_disk=not args.no_save)
+    if args.record:
+        print("📹 Recording mode enabled - select region to record")
+    
+    app = ScreenshotApp(
+        annotate=annotate,
+        save_to_disk=not args.no_save,
+        record_mode=args.record
+    )
     success = app.run(timeout=args.timeout)
     
     sys.exit(0 if success else 1)
