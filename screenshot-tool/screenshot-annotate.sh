@@ -14,6 +14,17 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SHAREX_SCRIPT="${SCRIPT_DIR}/screenshot-sharex.py"
+
+# Use mise-managed Python (dynamically resolved for Alfred/Karabiner compatibility)
+MISE="/opt/homebrew/bin/mise"
+if [[ -x "$MISE" ]]; then
+    PYTHON="$("$MISE" which python3 2>/dev/null)"
+fi
+# Fall back to system python3 if mise isn't available or didn't return a path
+if [[ -z "$PYTHON" || ! -x "$PYTHON" ]]; then
+    PYTHON="python3"
+fi
+
 ANNOTATE_MODE=false
 INSTALL_MODE=false
 NO_SAVE_MODE=false
@@ -71,13 +82,13 @@ fi
 
 # Install mode
 if [[ "$INSTALL_MODE" == true ]]; then
-    exec python3 "$SHAREX_SCRIPT" --install
+    exec "$PYTHON" "$SHAREX_SCRIPT" --install
 fi
 
 # Check for required Python modules - if missing, the Python script will prompt to install
-if ! python3 -c "import objc, Quartz, AppKit" 2>/dev/null; then
+if ! "$PYTHON" -c "import objc, Quartz, AppKit" 2>/dev/null; then
     echo "Dependencies not installed. Running setup..."
-    exec python3 "$SHAREX_SCRIPT"
+    exec "$PYTHON" "$SHAREX_SCRIPT"
 fi
 
 # Build arguments and run
@@ -92,4 +103,4 @@ if [[ "$ANNOTATE_MODE" == false && "$NO_SAVE_MODE" == false ]]; then
     ARGS="$ARGS --check-shift"
 fi
 
-exec python3 "$SHAREX_SCRIPT" $ARGS
+exec "$PYTHON" "$SHAREX_SCRIPT" $ARGS
