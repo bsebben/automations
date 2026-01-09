@@ -1620,10 +1620,17 @@ class ScreenshotApp:
         # Border thickness and padding - border will be drawn entirely OUTSIDE the recording region
         border_width = 3.0
         padding = int(border_width) + 1  # 4px padding ensures border is fully outside
+        pill_height = 24  # Extra space at top for the recording pill
         
         # Create a borderless window for the outline
-        # Window extends 'padding' pixels outside the recording region on each side
-        frame = NSMakeRect(ns_x - padding, ns_y - padding, width + padding * 2, height + padding * 2)
+        # Window extends 'padding' pixels outside the recording region on sides/bottom
+        # and 'padding + pill_height' above to fit the pill outside the capture area
+        frame = NSMakeRect(
+            ns_x - padding, 
+            ns_y - padding,  # Bottom stays the same
+            width + padding * 2, 
+            height + padding * 2 + pill_height  # Extra height at top for pill
+        )
         
         outline_window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             frame,
@@ -1636,11 +1643,14 @@ class ScreenshotApp:
         outline_window.setBackgroundColor_(NSColor.clearColor())
         outline_window.setIgnoresMouseEvents_(True)
         outline_window.setHasShadow_(False)
+        # NSWindowSharingNone (0) = exclude from screen recordings/captures
+        outline_window.setSharingType_(0)
         
         # Create a view that draws the outline
-        view = RecordingOutlineView.alloc().initWithFrame_(NSMakeRect(0, 0, width + padding * 2, height + padding * 2))
+        view = RecordingOutlineView.alloc().initWithFrame_(NSMakeRect(0, 0, width + padding * 2, height + padding * 2 + pill_height))
         view.padding = padding
         view.border_width = border_width
+        view.pill_height = pill_height
         outline_window.setContentView_(view)
         outline_window.makeKeyAndOrderFront_(None)
         
@@ -1879,10 +1889,12 @@ class RecordingOutlineView(NSView):
     """View that draws a red outline for recording region with status pill.
     
     The border is drawn OUTSIDE the recording region so it doesn't appear in the capture.
+    The pill is drawn ABOVE the recording region in extra space added to the window.
     """
     
     padding = 4  # Default, will be set by _create_recording_outline
     border_width = 3.0
+    pill_height = 24  # Extra space at top for pill
     
     def drawRect_(self, rect):
         """Draw a red outline and recording pill."""
@@ -1894,27 +1906,39 @@ class RecordingOutlineView(NSView):
         
         padding = getattr(self, 'padding', 4)
         border_width = getattr(self, 'border_width', 3.0)
+        pill_space = getattr(self, 'pill_height', 24)
+        
+        # The view layout (from bottom to top):
+        # - padding: bottom border area
+        # - recording_height: the actual recording region (NOT drawn on, just outlined)
+        # - padding: top border area  
+        # - pill_space: extra space for the pill (ABOVE recording region)
+        
+        view_height = self.bounds().size.height
+        view_width = self.bounds().size.width
+        
+        # Recording region in view coordinates (bottom-left origin)
+        # Recording region starts at (padding, padding) and excludes the pill_space at top
+        recording_width = view_width - 2 * padding
+        recording_height = view_height - 2 * padding - pill_space
         
         # Draw red border OUTSIDE the recording region
-        # The recording region starts at (padding, padding) in view coordinates
-        # We draw the border path offset outward so the stroke is entirely outside
         border_color = NSColor.colorWithCalibratedRed_green_blue_alpha_(1.0, 0.2, 0.2, 0.9)
         border_color.set()
         
         # Calculate the border path - offset outward by half the border width
-        # so the inner edge of the stroke aligns with (or is outside) the recording boundary
         half_border = border_width / 2
         border_rect = NSMakeRect(
-            padding - half_border - 0.5,  # Extra 0.5px outward for safety
             padding - half_border - 0.5,
-            self.bounds().size.width - 2 * padding + border_width + 1,
-            self.bounds().size.height - 2 * padding + border_width + 1
+            padding - half_border - 0.5,
+            recording_width + border_width + 1,
+            recording_height + border_width + 1
         )
         border_path = NSBezierPath.bezierPathWithRect_(border_rect)
         border_path.setLineWidth_(border_width)
         border_path.stroke()
         
-        # Draw recording pill OUTSIDE the recording area (in the top padding area)
+        # Draw recording pill in the pill_space ABOVE the recording area
         pill_text = "● REC   ⌘. stop  |  ESC cancel"
         font = NSFont.systemFontOfSize_(11)
         
@@ -1925,18 +1949,19 @@ class RecordingOutlineView(NSView):
         }
         text_size = NSString.stringWithString_(pill_text).sizeWithAttributes_(attrs)
         
-        # Pill dimensions - positioned in the top-left corner OUTSIDE the recording region
+        # Pill dimensions
         pill_padding_h = 6
         pill_padding_v = 3
         pill_width = text_size.width + pill_padding_h * 2
-        pill_height = text_size.height + pill_padding_v * 2
+        actual_pill_height = text_size.height + pill_padding_v * 2
         
-        # Position pill at top-left, outside the recording area
-        pill_x = 0
-        pill_y = self.bounds().size.height - pill_height  # At the very top
+        # Position pill at top-left, in the pill_space above the recording border
+        # The pill_space starts at (padding + recording_height + padding) = view_height - pill_space
+        pill_x = padding
+        pill_y = view_height - pill_space + (pill_space - actual_pill_height) / 2  # Centered in pill_space
         
         # Draw pill background (red, semi-transparent)
-        pill_rect = NSMakeRect(pill_x, pill_y, pill_width, pill_height)
+        pill_rect = NSMakeRect(pill_x, pill_y, pill_width, actual_pill_height)
         pill_bg = NSColor.colorWithCalibratedRed_green_blue_alpha_(0.8, 0.1, 0.1, 0.95)
         pill_bg.set()
         pill_path = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(pill_rect, 4, 4)
@@ -1944,7 +1969,7 @@ class RecordingOutlineView(NSView):
         
         # Draw text
         text_x = pill_x + pill_padding_h
-        text_y = pill_y + (pill_height - text_size.height) / 2
+        text_y = pill_y + (actual_pill_height - text_size.height) / 2
         NSString.stringWithString_(pill_text).drawAtPoint_withAttributes_(
             NSMakePoint(text_x, text_y), attrs
         )
