@@ -24,6 +24,14 @@ from .dependencies import (
     check_accessibility_permissions,
 )
 
+# ScreenRecorder requires PyObjC - import conditionally
+try:
+    from .recorder import ScreenRecorder
+    _RECORDER_AVAILABLE = True
+except ImportError:
+    ScreenRecorder = None
+    _RECORDER_AVAILABLE = False
+
 __all__ = [
     # Models
     "WindowInfo",
@@ -44,5 +52,7 @@ __all__ = [
     "handle_early_flags",
     "handle_import_error",
     "check_accessibility_permissions",
+    # Recorder
+    "ScreenRecorder",
 ]
 

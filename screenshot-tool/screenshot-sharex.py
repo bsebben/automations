@@ -38,9 +38,7 @@ from lib.utils import (
     show_notification,
     get_screenshots_dir,
     get_next_screenshot_number,
-    get_next_recording_number,
     generate_screenshot_path,
-    generate_recording_path,
 )
 from lib.dependencies import (
     handle_early_flags,
@@ -48,6 +46,7 @@ from lib.dependencies import (
     check_accessibility_permissions,
     install_dependencies,
 )
+from lib.recorder import ScreenRecorder
 
 # Handle --install and --check-installed flags early (before importing PyObjC)
 handle_early_flags()
@@ -204,16 +203,8 @@ class ScreenshotApp:
         self._last_mouse_update = 0
         self._mouse_throttle_ms = 50  # Only update every 50ms
         
-        # Recording state (for --record mode)
-        self._recording_process = None
-        self._recording_temp_file = None
-        self._recording_bounds = None
-        self._is_recording = False
-        self._recording_cancelled = False
-        self._recording_outline_window = None
-        self._recording_event_tap = None
-        self._recording_run_loop_source = None
-        self._recording_keyboard_callback = None
+        # Screen recorder (for --record mode)
+        self._recorder: Optional[ScreenRecorder] = None
         
         # System-wide accessibility element
         self.system_wide_element = AXUIElementCreateSystemWide()
@@ -319,8 +310,11 @@ class ScreenshotApp:
         # CGEventTap callback
         def cg_event_callback(proxy, event_type, event, refcon):
             try:
+                # Check if recording is active
+                is_recording = app_ref._recorder and app_ref._recorder.is_recording
+                
                 # Debug: log key events during recording to verify callback is working
-                if app_ref._is_recording and event_type == kCGEventKeyDown:
+                if is_recording and event_type == kCGEventKeyDown:
                     keycode = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode)
                     print(f"[Recording] Key event received: keycode={keycode}")
                 
@@ -339,18 +333,17 @@ class ScreenshotApp:
                         print(f"Key pressed: {keycode}, flags: {flags}")
 
                     # RECORDING MODE: Handle recording-specific shortcuts
-                    if app_ref._is_recording:
+                    if is_recording:
                         # ESC key (keycode 53) - cancel recording
                         if keycode == 53:
                             print("\nRecording cancelled (ESC)")
-                            app_ref._recording_cancelled = True
-                            app_ref._is_recording = False
+                            app_ref._recorder.cancel()
                             return None  # Consume the event
                         
                         # ⌘. (Command + Period, keycode 47) - stop recording
                         if keycode == 47 and (flags & kCGEventFlagMaskCommand):
                             print("\nStop signal received (⌘.)")
-                            app_ref._is_recording = False
+                            app_ref._recorder.signal_stop()
                             return None  # Consume the event
                         
                         # Ignore all other keys during recording
@@ -374,7 +367,7 @@ class ScreenshotApp:
                         return None  # Consume the event
 
                 # Skip mouse events during recording (we don't want to trigger anything)
-                if app_ref._is_recording:
+                if is_recording:
                     return event
 
                 # Mouse events (only when not recording)
@@ -1279,455 +1272,6 @@ class ScreenshotApp:
         primary_scale = screens[0].backingScaleFactor() if screens else 1.0
         return (0, 0.0, 0.0, primary_scale)
     
-    def _start_recording(self, x: float, y: float, width: float, height: float):
-        """Start screen recording of the specified region using macOS screencapture."""
-        import time
-        
-        # Create temp file for recording
-        temp_dir = tempfile.gettempdir()
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self._recording_temp_file = os.path.join(temp_dir, f"recording_{timestamp}.mov")
-        self._recording_bounds = (x, y, width, height)
-        
-        # No cropping needed - screencapture records exactly the region we specify
-        self._recording_crop = None
-        
-        # Use macOS native screencapture command with -R for region
-        # Format: -R x,y,width,height (in screen coordinates, top-left origin)
-        # screencapture -v records video, -R specifies the region
-        cmd = [
-            "screencapture",
-            "-v",  # Video recording mode
-            "-R", f"{int(x)},{int(y)},{int(width)},{int(height)}",  # Region to capture
-            self._recording_temp_file
-        ]
-        
-        print(f"Recording region: {int(width)}x{int(height)} at ({int(x)}, {int(y)})")
-        print(f"Output: {self._recording_temp_file}")
-        print(f"Command: {' '.join(cmd)}")
-        
-        try:
-            # Start screencapture
-            self._recording_process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                stdin=subprocess.PIPE
-            )
-            self._is_recording = True
-            
-            # Give it a moment to start
-            time.sleep(0.5)
-            
-            # Check if screencapture is still running
-            if self._recording_process.poll() is not None:
-                # Exited immediately - there was an error
-                exit_code = self._recording_process.returncode
-                _, stderr = self._recording_process.communicate()
-                print(f"screencapture failed (exit code {exit_code}): {stderr.decode('utf-8', errors='ignore')}")
-                self._show_notification("Recording failed - check screen recording permissions")
-                return False
-            
-            print(f"✓ Recording started (PID: {self._recording_process.pid})")
-            
-            # Show notification
-            self._show_notification("Recording started! Press ⌘. to stop")
-            
-            return True
-            
-        except Exception as e:
-            print(f"Failed to start recording: {e}")
-            self._show_notification(f"Recording failed: {e}")
-            return False
-    
-    def _print_ffmpeg_stderr(self):
-        """Print the ffmpeg stderr log for debugging (legacy, kept for compatibility)."""
-        stderr_file = getattr(self, '_ffmpeg_stderr_file', None)
-        if stderr_file and os.path.exists(stderr_file):
-            try:
-                with open(stderr_file, 'r') as f:
-                    stderr_content = f.read()
-                if stderr_content.strip():
-                    print(f"Recording stderr output:\n{'=' * 40}")
-                    print(stderr_content[-2000:])
-                    print('=' * 40)
-            except Exception as e:
-                print(f"Could not read stderr: {e}")
-    
-    def _stop_recording(self, cancelled: bool = False):
-        """Stop the current recording and optionally convert to GIF."""
-        import signal
-        
-        if not self._recording_process:
-            return None
-        
-        if cancelled:
-            print("\nCancelling recording...")
-        else:
-            print("\nStopping recording...")
-        self._is_recording = False
-        
-        # Close recording UI windows (use orderOut to avoid segfault)
-        if self._recording_outline_window:
-            try:
-                self._recording_outline_window.orderOut_(None)
-            except Exception:
-                pass
-            # Don't set to None here - let the caller handle final cleanup
-        
-        # Check if recording process is still running
-        poll_result = self._recording_process.poll()
-        if poll_result is not None:
-            print(f"⚠️  Recording process already exited with code {poll_result}")
-            self._recording_process = None
-            # If it exited cleanly (code 0), the file might still exist
-            if poll_result != 0:
-                return None
-        else:
-            # Stop recording using SIGINT (Ctrl+C equivalent)
-            try:
-                print(f"Stopping recording (PID: {self._recording_process.pid})...")
-                self._recording_process.send_signal(signal.SIGINT)
-                self._recording_process.wait(timeout=5)
-                print("✓ Recording stopped")
-            except subprocess.TimeoutExpired:
-                print("Recording didn't stop with SIGINT, terminating...")
-                self._recording_process.terminate()
-                try:
-                    self._recording_process.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    print("Recording didn't respond to SIGTERM, killing...")
-                    self._recording_process.kill()
-                    self._recording_process.wait()
-            except Exception as e:
-                print(f"Error stopping recording: {e}")
-                try:
-                    self._recording_process.kill()
-                    self._recording_process.wait()
-                except Exception:
-                    pass
-            
-            self._recording_process = None
-        
-        # Check if recording file exists
-        if not os.path.exists(self._recording_temp_file):
-            print("✗ Recording file not found")
-            self._print_ffmpeg_stderr()
-            if not cancelled:
-                self._show_notification("Recording failed - no output file")
-            return None
-        
-        # If cancelled, just clean up temp file
-        if cancelled:
-            try:
-                os.remove(self._recording_temp_file)
-                print("✓ Recording cancelled, temp file cleaned up")
-            except Exception:
-                pass
-            self._show_notification("Recording cancelled")
-            return None
-        
-        file_size = os.path.getsize(self._recording_temp_file)
-        print(f"✓ Recording saved: {file_size} bytes")
-        
-        # Convert to GIF
-        return self._convert_to_gif()
-    
-    def _convert_to_gif(self) -> Optional[str]:
-        """Convert the recorded video to GIF."""
-        if not self._recording_temp_file or not os.path.exists(self._recording_temp_file):
-            return None
-        
-        print("Converting to GIF...")
-        
-        # Generate output path using library functions
-        screenshots_dir = get_screenshots_dir()
-        gif_path = generate_recording_path(screenshots_dir)
-        gif_filename = os.path.basename(gif_path)
-        
-        # Get crop info (we recorded full screen and crop during conversion)
-        crop_info = getattr(self, '_recording_crop', None)
-        if crop_info:
-            crop_filter = f"crop={crop_info['width']}:{crop_info['height']}:{crop_info['x']}:{crop_info['y']},"
-            output_width = crop_info['width']
-            print(f"Applying crop: {crop_info['width']}x{crop_info['height']} at ({crop_info['x']}, {crop_info['y']})")
-        else:
-            crop_filter = ""
-            output_width = int(self._recording_bounds[2]) if self._recording_bounds else 640
-        
-        # Scale down if too large (max 800px width for reasonable GIF size)
-        scale_width = min(output_width, 800)
-        
-        # Convert using ffmpeg with optimized GIF settings
-        # Two-pass for better quality: generate palette first, then use it
-        palette_file = os.path.join(tempfile.gettempdir(), "palette.png")
-        
-        try:
-            # Pass 1: Generate palette (with crop applied first)
-            palette_cmd = [
-                "ffmpeg", "-y",
-                "-i", self._recording_temp_file,
-                "-vf", f"{crop_filter}fps=15,scale={scale_width}:-1:flags=lanczos,palettegen=stats_mode=diff",
-                palette_file
-            ]
-            print(f"Generating palette...")
-            result = subprocess.run(palette_cmd, capture_output=True, text=True)
-            if result.returncode != 0:
-                print(f"Palette generation failed: {result.stderr[-500:]}")
-                raise subprocess.CalledProcessError(result.returncode, palette_cmd)
-            
-            # Pass 2: Create GIF using palette (with crop applied first)
-            gif_cmd = [
-                "ffmpeg", "-y",
-                "-i", self._recording_temp_file,
-                "-i", palette_file,
-                "-lavfi", f"{crop_filter}fps=15,scale={scale_width}:-1:flags=lanczos[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=5",
-                gif_path
-            ]
-            print(f"Creating GIF...")
-            result = subprocess.run(gif_cmd, capture_output=True, text=True)
-            if result.returncode != 0:
-                print(f"GIF creation failed: {result.stderr[-500:]}")
-                raise subprocess.CalledProcessError(result.returncode, gif_cmd)
-            
-            print(f"✓ GIF saved to: {gif_path}")
-            
-            # Copy GIF to clipboard (as file reference)
-            self._copy_gif_to_clipboard(gif_path)
-            
-            # Cleanup temp files
-            try:
-                os.remove(self._recording_temp_file)
-                os.remove(palette_file)
-            except Exception:
-                pass
-            
-            self._show_notification(f"Recording saved to {gif_filename}!")
-            return gif_path
-            
-        except subprocess.CalledProcessError as e:
-            print(f"✗ GIF conversion failed: {e}")
-            self._show_notification("GIF conversion failed")
-            return None
-    
-    def _get_next_recording_number(self, screenshots_dir: str) -> int:
-        """Find the next available sequential number for recordings."""
-        return get_next_recording_number(screenshots_dir)
-    
-    def _copy_gif_to_clipboard(self, gif_path: str):
-        """Copy GIF file to clipboard using osascript (most reliable method)."""
-        try:
-            # Check file exists
-            if not os.path.exists(gif_path):
-                print(f"✗ GIF file not found: {gif_path}")
-                return False
-            
-            print(f"Copying to clipboard: {gif_path}")
-            
-            # Use osascript to copy the file to clipboard - this is the most reliable method
-            # It copies as a file reference that can be pasted in Finder, Slack, etc.
-            script = f'''
-                set theFile to POSIX file "{gif_path}"
-                set the clipboard to theFile
-            '''
-            result = subprocess.run(
-                ["osascript", "-e", script],
-                capture_output=True,
-                text=True
-            )
-            
-            if result.returncode == 0:
-                print("✓ GIF copied to clipboard")
-                return True
-            else:
-                print(f"✗ osascript failed: {result.stderr}")
-                # Fall back to NSImage method
-                return self._copy_gif_to_clipboard_nsimage(gif_path)
-                
-        except Exception as e:
-            print(f"Could not copy to clipboard: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
-    
-    def _copy_gif_to_clipboard_nsimage(self, gif_path: str):
-        """Fallback: Copy GIF as NSImage to clipboard."""
-        try:
-            from Foundation import NSData
-            
-            # Read the GIF file
-            with open(gif_path, 'rb') as f:
-                gif_bytes = f.read()
-            
-            gif_data = NSData.dataWithBytes_length_(gif_bytes, len(gif_bytes))
-            if not gif_data:
-                print("✗ Could not read GIF file")
-                return False
-            
-            # Create NSImage from GIF data
-            image = NSImage.alloc().initWithData_(gif_data)
-            if not image:
-                print("✗ Could not create image from GIF")
-                return False
-            
-            pasteboard = NSPasteboard.generalPasteboard()
-            pasteboard.clearContents()
-            
-            # Write the image
-            success = pasteboard.writeObjects_([image])
-            
-            if success:
-                print("✓ GIF copied to clipboard (as image)")
-                return True
-            else:
-                print("✗ Failed to write to clipboard")
-                return False
-                
-        except Exception as e:
-            print(f"Fallback clipboard copy failed: {e}")
-            return False
-    
-    def _create_recording_outline(self, x: float, y: float, width: float, height: float):
-        """Create a simple outline window to show the recording region.
-        
-        The border is drawn OUTSIDE the recording region so it doesn't appear in the capture.
-        
-        Args:
-            x, y: Top-left corner in CGWindow coordinates (origin at top-left of primary display)
-            width, height: Size of the region
-        """
-        # Get PRIMARY screen height for coordinate conversion
-        # CGWindow uses top-left origin, NSWindow uses bottom-left origin
-        # Must use primary display (at origin 0,0), not mainScreen() which changes with focus
-        main_height = 0
-        for screen in NSScreen.screens():
-            frame = screen.frame()
-            if frame.origin.x == 0 and frame.origin.y == 0:
-                main_height = frame.size.height
-                break
-        if main_height == 0:
-            main_height = NSScreen.screens()[0].frame().size.height
-        
-        # Convert from CGWindow coords (top-left origin) to NSWindow coords (bottom-left origin)
-        # NSWindow y = main_screen_height - CGWindow_y - rect_height
-        ns_x = x
-        ns_y = main_height - y - height
-        
-        if self._debug:
-            print(f"Recording outline: CGWindow({x}, {y}, {width}, {height}) -> NSWindow({ns_x}, {ns_y})")
-            print(f"  main_height={main_height}")
-        
-        # Border thickness and padding - border will be drawn entirely OUTSIDE the recording region
-        border_width = 3.0
-        padding = int(border_width) + 1  # 4px padding ensures border is fully outside
-        pill_height = 24  # Extra space at top for the recording pill
-        
-        # Create a borderless window for the outline
-        # Window extends 'padding' pixels outside the recording region on sides/bottom
-        # and 'padding + pill_height' above to fit the pill outside the capture area
-        frame = NSMakeRect(
-            ns_x - padding, 
-            ns_y - padding,  # Bottom stays the same
-            width + padding * 2, 
-            height + padding * 2 + pill_height  # Extra height at top for pill
-        )
-        
-        outline_window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
-            frame,
-            NSBorderlessWindowMask,
-            NSBackingStoreBuffered,
-            False
-        )
-        outline_window.setLevel_(NSStatusWindowLevel + 500)
-        outline_window.setOpaque_(False)
-        outline_window.setBackgroundColor_(NSColor.clearColor())
-        outline_window.setIgnoresMouseEvents_(True)
-        outline_window.setHasShadow_(False)
-        # NSWindowSharingNone (0) = exclude from screen recordings/captures
-        outline_window.setSharingType_(0)
-        
-        # Create a view that draws the outline
-        view = RecordingOutlineView.alloc().initWithFrame_(NSMakeRect(0, 0, width + padding * 2, height + padding * 2 + pill_height))
-        view.padding = padding
-        view.border_width = border_width
-        view.pill_height = pill_height
-        outline_window.setContentView_(view)
-        outline_window.makeKeyAndOrderFront_(None)
-        
-        return outline_window
-    
-    def _setup_recording_keyboard_monitor(self):
-        """Set up CGEventTap for recording controls (ESC to cancel, ⌘. to stop)."""
-        
-        def recording_keyboard_callback(proxy, event_type, event, refcon):
-            """Handle keyboard events during recording."""
-            if event_type == kCGEventKeyDown:
-                key_code = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode)
-                flags = CGEventGetFlags(event)
-                
-                # ESC key (keyCode 53) - cancel recording
-                if key_code == 53:
-                    print("\nRecording cancelled (ESC)")
-                    self._recording_cancelled = True
-                    self._is_recording = False
-                    return None  # Consume the event
-                
-                # ⌘. (Command + Period, keyCode 47) - stop recording
-                if key_code == 47 and (flags & kCGEventFlagMaskCommand):
-                    print("\nStop signal received (⌘.)")
-                    self._is_recording = False
-                    return None  # Consume the event
-            
-            return event
-        
-        # Store callback reference to prevent garbage collection
-        self._recording_keyboard_callback = recording_keyboard_callback
-        
-        # Create event tap for keyboard events only
-        event_mask = CGEventMaskBit(kCGEventKeyDown)
-        
-        self._recording_event_tap = CGEventTapCreate(
-            kCGSessionEventTap,
-            kCGHeadInsertEventTap,
-            kCGEventTapOptionDefault,
-            event_mask,
-            self._recording_keyboard_callback,
-            None
-        )
-        
-        if self._recording_event_tap:
-            # Create run loop source and add to current run loop
-            self._recording_run_loop_source = CFMachPortCreateRunLoopSource(
-                None, self._recording_event_tap, 0
-            )
-            CFRunLoopAddSource(
-                CFRunLoopGetCurrent(),
-                self._recording_run_loop_source,
-                kCFRunLoopCommonModes
-            )
-            # Enable the tap
-            CGEventTapEnable(self._recording_event_tap, True)
-            print("Recording keyboard monitor active (ESC=cancel, ⌘.=stop)")
-        else:
-            print("Warning: Failed to create recording keyboard event tap")
-    
-    def _remove_recording_keyboard_monitor(self):
-        """Remove the recording keyboard event tap."""
-        if hasattr(self, '_recording_event_tap') and self._recording_event_tap:
-            try:
-                CGEventTapEnable(self._recording_event_tap, False)
-                if hasattr(self, '_recording_run_loop_source') and self._recording_run_loop_source:
-                    CFRunLoopRemoveSource(
-                        CFRunLoopGetCurrent(),
-                        self._recording_run_loop_source,
-                        kCFRunLoopCommonModes
-                    )
-                    self._recording_run_loop_source = None
-            except Exception as e:
-                print(f"Warning: Error removing recording keyboard monitor: {e}")
-            self._recording_event_tap = None
-        self._recording_keyboard_callback = None
-    
     def _handle_recording_capture(self, x: float, y: float, width: float, height: float):
         """Handle capture in recording mode - start recording instead of screenshot."""
         print(f"Recording capture region: x={x}, y={y}, width={width}, height={height}")
@@ -1741,92 +1285,24 @@ class ScreenshotApp:
             NSDate.dateWithTimeIntervalSinceNow_(0.1)
         )
         
-        # Reset cancelled flag
-        self._recording_cancelled = False
-        
-        # Create recording outline overlay (includes the status pill)
-        # Note: Border is drawn OUTSIDE the recording region so it won't appear in the capture
-        self._recording_outline_window = self._create_recording_outline(x, y, width, height)
-        
-        # Main event tap handles ESC (cancel) and ⌘. (stop) - see cg_event_callback
-        
-        # Start recording
-        if self._start_recording(x, y, width, height):
-            # Enter recording loop - wait for keyboard shortcut
-            self._run_recording_loop()
-        
-        # Clean up
-        self._recording_outline_window = None
-    
-    def _run_recording_loop(self):
-        """Run loop while recording - wait for keyboard shortcut."""
-        import time
-        
-        print("\n" + "=" * 50)
-        print("● RECORDING IN PROGRESS")
-        print("=" * 50)
-        print("  ⌘.  (Command+Period) to stop and save")
-        print("  ESC to cancel")
-        print("=" * 50 + "\n")
-        
-        # Run loop while recording - just process events and wait for keyboard shortcut
-        start_time = time.time()
-        last_print_time = 0
-        last_tap_check = 0
-        
-        while self._is_recording:
-            # Process Cocoa events
-            NSRunLoop.currentRunLoop().runUntilDate_(
-                NSDate.dateWithTimeIntervalSinceNow_(0.1)
-            )
-            
-            current_time = time.time()
-            
-            # Re-enable event tap periodically (it can time out and be disabled by macOS)
-            if current_time - last_tap_check > 1.0:  # Check every second
-                if self.event_tap:
-                    CGEventTapEnable(self.event_tap, True)
-                last_tap_check = current_time
-            
-            # Show elapsed time every 5 seconds
-            elapsed = int(current_time - start_time)
-            if elapsed > 0 and elapsed != last_print_time and elapsed % 5 == 0:
-                print(f"Recording: {elapsed}s elapsed...")
-                last_print_time = elapsed
-        
-        # IMMEDIATELY hide the recording overlay when stop is triggered
-        if self._recording_outline_window:
-            try:
-                self._recording_outline_window.orderOut_(None)
-                self._recording_outline_window.close()
-                self._recording_outline_window = None
-            except Exception:
-                pass
-        
-        # Process events to ensure the window actually disappears from screen
-        NSRunLoop.currentRunLoop().runUntilDate_(
-            NSDate.dateWithTimeIntervalSinceNow_(0.05)
+        # Create and configure recorder
+        self._recorder = ScreenRecorder(
+            get_primary_screen_height=self._get_primary_screen_height,
+            main_event_tap=self.event_tap,
+            debug=self._debug
         )
         
-        # Check if cancelled (ESC) or stopped (⌘.)
-        was_cancelled = getattr(self, '_recording_cancelled', False)
+        # Create recording outline overlay
+        self._recorder.create_outline(x, y, width, height)
         
-        # Stop recording and convert (unless cancelled)
-        print("Processing recording...")
-        try:
-            gif_path = self._stop_recording(cancelled=was_cancelled)
-            self.captured = gif_path is not None
-        except Exception as e:
-            print(f"Error during stop: {e}")
-            import traceback
-            traceback.print_exc()
-            self.captured = False
+        # Start recording
+        if self._recorder.start(x, y, width, height):
+            # Enter recording loop - wait for keyboard shortcut
+            self.captured = self._recorder.run_loop()
         
+        # Clean up
+        self._recorder = None
         self.should_quit = True
-    
-    # ============================================================
-    # END RECORDING FUNCTIONALITY
-    # ============================================================
     
     def run(self, timeout: float = 30.0):
         """Run the application with optional timeout.
@@ -1883,96 +1359,6 @@ class ScreenshotApp:
         self.overlay_windows = []
 
         return self.captured
-
-
-class RecordingOutlineView(NSView):
-    """View that draws a red outline for recording region with status pill.
-    
-    The border is drawn OUTSIDE the recording region so it doesn't appear in the capture.
-    The pill is drawn ABOVE the recording region in extra space added to the window.
-    """
-    
-    padding = 4  # Default, will be set by _create_recording_outline
-    border_width = 3.0
-    pill_height = 24  # Extra space at top for pill
-    
-    def drawRect_(self, rect):
-        """Draw a red outline and recording pill."""
-        from AppKit import NSFont, NSFontAttributeName, NSForegroundColorAttributeName
-        
-        # Clear background
-        NSColor.clearColor().set()
-        NSBezierPath.fillRect_(self.bounds())
-        
-        padding = getattr(self, 'padding', 4)
-        border_width = getattr(self, 'border_width', 3.0)
-        pill_space = getattr(self, 'pill_height', 24)
-        
-        # The view layout (from bottom to top):
-        # - padding: bottom border area
-        # - recording_height: the actual recording region (NOT drawn on, just outlined)
-        # - padding: top border area  
-        # - pill_space: extra space for the pill (ABOVE recording region)
-        
-        view_height = self.bounds().size.height
-        view_width = self.bounds().size.width
-        
-        # Recording region in view coordinates (bottom-left origin)
-        # Recording region starts at (padding, padding) and excludes the pill_space at top
-        recording_width = view_width - 2 * padding
-        recording_height = view_height - 2 * padding - pill_space
-        
-        # Draw red border OUTSIDE the recording region
-        border_color = NSColor.colorWithCalibratedRed_green_blue_alpha_(1.0, 0.2, 0.2, 0.9)
-        border_color.set()
-        
-        # Calculate the border path - offset outward by half the border width
-        half_border = border_width / 2
-        border_rect = NSMakeRect(
-            padding - half_border - 0.5,
-            padding - half_border - 0.5,
-            recording_width + border_width + 1,
-            recording_height + border_width + 1
-        )
-        border_path = NSBezierPath.bezierPathWithRect_(border_rect)
-        border_path.setLineWidth_(border_width)
-        border_path.stroke()
-        
-        # Draw recording pill in the pill_space ABOVE the recording area
-        pill_text = "● REC   ⌘. stop  |  ESC cancel"
-        font = NSFont.systemFontOfSize_(11)
-        
-        # Calculate text size
-        attrs = {
-            NSFontAttributeName: font,
-            NSForegroundColorAttributeName: NSColor.whiteColor()
-        }
-        text_size = NSString.stringWithString_(pill_text).sizeWithAttributes_(attrs)
-        
-        # Pill dimensions
-        pill_padding_h = 6
-        pill_padding_v = 3
-        pill_width = text_size.width + pill_padding_h * 2
-        actual_pill_height = text_size.height + pill_padding_v * 2
-        
-        # Position pill at top-left, in the pill_space above the recording border
-        # The pill_space starts at (padding + recording_height + padding) = view_height - pill_space
-        pill_x = padding
-        pill_y = view_height - pill_space + (pill_space - actual_pill_height) / 2  # Centered in pill_space
-        
-        # Draw pill background (red, semi-transparent)
-        pill_rect = NSMakeRect(pill_x, pill_y, pill_width, actual_pill_height)
-        pill_bg = NSColor.colorWithCalibratedRed_green_blue_alpha_(0.8, 0.1, 0.1, 0.95)
-        pill_bg.set()
-        pill_path = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(pill_rect, 4, 4)
-        pill_path.fill()
-        
-        # Draw text
-        text_x = pill_x + pill_padding_h
-        text_y = pill_y + (actual_pill_height - text_size.height) / 2
-        NSString.stringWithString_(pill_text).drawAtPoint_withAttributes_(
-            NSMakePoint(text_x, text_y), attrs
-        )
 
 
 class OverlayView(NSView):
