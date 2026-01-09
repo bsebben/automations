@@ -1735,8 +1735,19 @@ class ScreenshotApp:
                 print(f"Recording: {elapsed}s elapsed...")
                 last_print_time = elapsed
         
-        # Small delay before stopping
-        time.sleep(0.2)
+        # IMMEDIATELY hide the recording overlay when stop is triggered
+        if self._recording_outline_window:
+            try:
+                self._recording_outline_window.orderOut_(None)
+                self._recording_outline_window.close()
+                self._recording_outline_window = None
+            except Exception:
+                pass
+        
+        # Process events to ensure the window actually disappears from screen
+        NSRunLoop.currentRunLoop().runUntilDate_(
+            NSDate.dateWithTimeIntervalSinceNow_(0.05)
+        )
         
         # Check if cancelled (ESC) or stopped (⌘.)
         was_cancelled = getattr(self, '_recording_cancelled', False)

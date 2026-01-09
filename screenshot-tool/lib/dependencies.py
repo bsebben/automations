@@ -270,3 +270,4 @@ def check_accessibility_permissions() -> bool:
         return True
 
 
+

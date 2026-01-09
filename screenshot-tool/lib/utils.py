@@ -11,10 +11,28 @@ from typing import Optional
 
 
 def show_notification(message: str, title: str = "Screenshot"):
-    """Show a system notification using osascript."""
-    # Escape single quotes in the message for AppleScript
-    safe_message = message.replace("'", "'\\''")
-    os.system(f'osascript -e \'display notification "{safe_message}" with title "{title}"\'')
+    """Show a system notification.
+    
+    Uses terminal-notifier if available (more reliable), falls back to osascript.
+    """
+    import subprocess
+    
+    # Try terminal-notifier first (more reliable, especially from background processes)
+    try:
+        result = subprocess.run(
+            ['terminal-notifier', '-title', title, '-message', message, '-sound', 'default'],
+            capture_output=True,
+            timeout=3
+        )
+        if result.returncode == 0:
+            return
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    
+    # Fallback to osascript
+    safe_message = message.replace("'", "'\\''").replace('"', '\\"')
+    safe_title = title.replace("'", "'\\''").replace('"', '\\"')
+    os.system(f'osascript -e \'display notification "{safe_message}" with title "{safe_title}"\'')
 
 
 def get_screenshots_dir() -> str:
