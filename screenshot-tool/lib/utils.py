@@ -7,7 +7,6 @@ These are pure utility functions that don't depend on application state.
 import os
 import re
 from datetime import datetime
-from typing import Optional
 
 
 def show_notification(message: str, title: str = "Screenshot"):

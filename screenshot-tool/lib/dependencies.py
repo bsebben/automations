@@ -6,7 +6,6 @@ Handles checking, installing, and importing PyObjC dependencies.
 
 import sys
 import subprocess
-from typing import List, Optional
 
 # Required packages for PyObjC
 REQUIRED_PACKAGES = [

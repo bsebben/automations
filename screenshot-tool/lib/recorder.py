@@ -20,15 +20,12 @@ from typing import Callable, Optional, Tuple
 from lib.utils import (
     show_notification,
     get_screenshots_dir,
-    get_next_recording_number,
     generate_recording_path,
 )
 
-# PyObjC imports - these are imported at module level
-# The main app ensures PyObjC is available before importing this module
+# PyObjC imports - loaded after dependencies are installed
 try:
     from AppKit import (
-        NSApplication,
         NSWindow,
         NSView,
         NSColor,
@@ -41,7 +38,6 @@ try:
         NSFont,
         NSFontAttributeName,
         NSForegroundColorAttributeName,
-        NSScreen,
         NSString,
         NSMakeRect,
         NSMakePoint,

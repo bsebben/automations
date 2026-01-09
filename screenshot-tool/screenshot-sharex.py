@@ -54,7 +54,6 @@ handle_early_flags()
 # Try to import PyObjC modules
 _import_error = None
 try:
-    import objc
     from AppKit import (
         NSApplication,
         NSWindow,
@@ -63,12 +62,6 @@ try:
         NSBezierPath,
         NSScreen,
         NSEvent,
-        NSLeftMouseDownMask,
-        NSLeftMouseUpMask,
-        NSLeftMouseDraggedMask,
-        NSMouseMovedMask,
-        NSKeyDownMask,
-        NSFlagsChangedMask,
         NSApplicationActivationPolicyAccessory,
         NSBorderlessWindowMask,
         NSStatusWindowLevel,
@@ -76,16 +69,10 @@ try:
         NSFont,
         NSFontAttributeName,
         NSForegroundColorAttributeName,
-        NSTrackingArea,
-        NSTrackingMouseMoved,
-        NSTrackingActiveAlways,
-        NSTrackingInVisibleRect,
-        NSCursor,
         NSImage,
         NSPasteboard,
         NSPasteboardTypePNG,
         NSGraphicsContext,
-        NSCompositeCopy,
         NSAttributedString,
     )
     from Quartz import (
@@ -99,14 +86,10 @@ try:
         kCGWindowImageBoundsIgnoreFraming,
         CGRectMake,
         CGRectNull,
-        CGMainDisplayID,
-        CGDisplayBounds,
         CGEventSourceFlagsState,
         kCGEventSourceStateHIDSystemState,
         kCGEventFlagMaskShift,
-        CGPreflightListenEventAccess,
-        CGRequestListenEventAccess,
-        # For CGEventTap
+        # CGEventTap for keyboard/mouse monitoring
         CGEventTapCreate,
         CGEventTapEnable,
         kCGSessionEventTap,
@@ -125,29 +108,20 @@ try:
         CFMachPortCreateRunLoopSource,
         CFRunLoopGetCurrent,
         CFRunLoopAddSource,
-        CFRunLoopRemoveSource,
         kCFRunLoopCommonModes,
     )
     from Foundation import (
         NSMakeRect,
         NSMakePoint,
         NSMakeSize,
-        NSZeroRect,
-        NSMutableDictionary,
         NSRunLoop,
-        NSDefaultRunLoopMode,
         NSDate,
-        NSTimer,
-        NSObject,
-        NSString,
     )
     # Accessibility API for UI element detection
     from ApplicationServices import (
         AXUIElementCreateSystemWide,
         AXUIElementCopyElementAtPosition,
         AXUIElementCopyAttributeValue,
-        AXUIElementGetPid,
-        AXUIElementCreateApplication,
         kAXErrorSuccess,
     )
     # Accessibility attribute constants (these are string constants)
@@ -1171,106 +1145,6 @@ class ScreenshotApp:
     # ============================================================
     # RECORDING FUNCTIONALITY (for --record mode)
     # ============================================================
-    
-    def _check_ffmpeg_installed(self) -> bool:
-        """Check if ffmpeg is installed."""
-        try:
-            result = subprocess.run(
-                ["which", "ffmpeg"],
-                capture_output=True,
-                text=True
-            )
-            return result.returncode == 0
-        except Exception:
-            return False
-    
-    def _install_ffmpeg(self) -> bool:
-        """Prompt to install ffmpeg via Homebrew."""
-        from AppKit import NSAlert
-        
-        alert = NSAlert.alloc().init()
-        alert.setMessageText_("ffmpeg Required")
-        alert.setInformativeText_(
-            "Screen recording requires ffmpeg.\n\n"
-            "Would you like to install it via Homebrew?\n\n"
-            "(This may take a few minutes)"
-        )
-        alert.addButtonWithTitle_("Install ffmpeg")
-        alert.addButtonWithTitle_("Cancel")
-        
-        if alert.runModal() != 1000:
-            return False
-        
-        print("Installing ffmpeg via Homebrew...")
-        result = os.system("brew install ffmpeg")
-        
-        if result == 0 and self._check_ffmpeg_installed():
-            print("✓ ffmpeg installed successfully!")
-            return True
-        else:
-            print("✗ Failed to install ffmpeg")
-            alert = NSAlert.alloc().init()
-            alert.setMessageText_("Installation Failed")
-            alert.setInformativeText_(
-                "Failed to install ffmpeg.\n\n"
-                "Install manually with: brew install ffmpeg"
-            )
-            alert.addButtonWithTitle_("OK")
-            alert.runModal()
-            return False
-    
-    def _get_screen_capture_devices(self):
-        """Get all available screen capture devices with their indices."""
-        import re
-        devices = {}  # screen_number -> device_index
-        try:
-            result = subprocess.run(
-                ["ffmpeg", "-f", "avfoundation", "-list_devices", "true", "-i", ""],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            output = result.stderr
-            
-            for line in output.split('\n'):
-                # Match "[AVFoundation indev @ 0x...] [2] Capture screen 0"
-                match = re.search(r'\[(\d+)\]\s*Capture screen\s*(\d+)', line)
-                if match:
-                    device_index = match.group(1)
-                    screen_number = int(match.group(2))
-                    devices[screen_number] = device_index
-                    print(f"Found Capture screen {screen_number} at device index {device_index}")
-            
-            return devices
-        except Exception as e:
-            print(f"Error listing devices: {e}")
-            return {}
-    
-    def _find_screen_for_point(self, x: float, y: float):
-        """Find which screen contains the given point (in CGWindow coordinates).
-        
-        Returns (screen_index, screen_origin_x, screen_origin_y, scale_factor) or None.
-        """
-        screens = NSScreen.screens()
-        primary_height = self._get_primary_screen_height()
-        
-        for idx, screen in enumerate(screens):
-            frame = screen.frame()
-            # NSScreen uses bottom-left origin, convert to top-left for comparison
-            screen_y_top = primary_height - frame.origin.y - frame.size.height
-            
-            # Check if point is within this screen (with some tolerance)
-            if (frame.origin.x <= x < frame.origin.x + frame.size.width and
-                screen_y_top <= y < screen_y_top + frame.size.height):
-                
-                scale = screen.backingScaleFactor()
-                print(f"Point ({x}, {y}) is on screen {idx}: origin=({frame.origin.x}, {screen_y_top}), size={frame.size.width}x{frame.size.height}, scale={scale}")
-                return (idx, frame.origin.x, screen_y_top, scale)
-        
-        # Default to primary screen
-        print(f"Point ({x}, {y}) not found on any screen, using primary screen")
-        primary_scale = screens[0].backingScaleFactor() if screens else 1.0
-        return (0, 0.0, 0.0, primary_scale)
     
     def _handle_recording_capture(self, x: float, y: float, width: float, height: float):
         """Handle capture in recording mode - start recording instead of screenshot."""
