@@ -126,3 +126,19 @@ def generate_recording_path(screenshots_dir: str) -> str:
     filename = f"recording-{next_num}.gif"
     return os.path.join(screenshots_dir, filename)
 
+
+def play_capture_sound():
+    """Play the macOS screenshot capture sound.
+    
+    Plays the system screenshot sound in the background (non-blocking).
+    """
+    import subprocess
+    
+    sound_path = "/System/Library/Components/CoreAudio.component/Contents/SharedSupport/SystemSounds/system/Screen Capture.aif"
+    if os.path.exists(sound_path):
+        subprocess.Popen(
+            ["afplay", sound_path],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+

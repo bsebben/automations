@@ -39,6 +39,7 @@ from lib.utils import (
     get_screenshots_dir,
     get_next_screenshot_number,
     generate_screenshot_path,
+    play_capture_sound,
 )
 from lib.dependencies import (
     handle_early_flags,
@@ -917,7 +918,8 @@ class ScreenshotApp:
 
                     self._copy_to_clipboard(temp_path)
 
-                    # Show notification
+                    # Play capture sound
+                    play_capture_sound()
                     if saved_path:
                         self._show_notification(f"Screenshot saved to {os.path.basename(saved_path)} and copied to clipboard!")
                     else:

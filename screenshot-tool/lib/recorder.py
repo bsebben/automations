@@ -21,6 +21,7 @@ from lib.utils import (
     show_notification,
     get_screenshots_dir,
     generate_recording_path,
+    play_capture_sound,
 )
 
 # PyObjC imports - loaded after dependencies are installed
@@ -426,6 +427,8 @@ class ScreenRecorder:
             except Exception:
                 pass
             
+            # Play capture sound and show notification
+            play_capture_sound()
             show_notification(f"Recording saved to {gif_filename}!")
             return gif_path
             

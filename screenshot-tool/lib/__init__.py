@@ -13,6 +13,7 @@ from .utils import (
     flip_y_coordinate,
     generate_screenshot_path,
     generate_recording_path,
+    play_capture_sound,
 )
 from .dependencies import (
     REQUIRED_PACKAGES,
@@ -44,6 +45,7 @@ __all__ = [
     "flip_y_coordinate",
     "generate_screenshot_path",
     "generate_recording_path",
+    "play_capture_sound",
     # Dependencies
     "REQUIRED_PACKAGES",
     "check_dependencies",
