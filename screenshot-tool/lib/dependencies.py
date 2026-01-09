@@ -269,3 +269,4 @@ def check_accessibility_permissions() -> bool:
         # Can't check, let's try to continue anyway
         return True
 
+
