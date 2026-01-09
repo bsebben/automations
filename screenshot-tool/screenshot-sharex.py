@@ -590,8 +590,13 @@ class ScreenshotApp:
         # In all modes, mouse down starts a potential drag for region selection
         # If user just clicks (no drag), we'll capture on mouse up
         self.is_dragging = True
-        self.drag_start = (location.x, self._flip_y(location.y))
+        flipped_y = self._flip_y(location.y)
+        self.drag_start = (location.x, flipped_y)
         self.drag_current = self.drag_start
+        
+        if self._debug:
+            main_h = self._get_primary_screen_height()
+            print(f"Mouse down: NSEvent({location.x}, {location.y}) -> CGWindow({location.x}, {flipped_y}) [primary_h={main_h}]")
     
     def _handle_mouse_up(self, event):
         """Handle mouse up - complete capture."""
@@ -610,6 +615,8 @@ class ScreenshotApp:
                 if width > 5 and height > 5:
                     x = min(x1, x2)
                     y = min(y1, y2)
+                    if self._debug:
+                        print(f"Drag selection: start=({x1}, {y1}), end=({x2}, {y2}) -> region=({x}, {y}, {width}, {height})")
                     self._capture_region(x, y, width, height)
                     captured = True
         
@@ -824,12 +831,31 @@ class ScreenshotApp:
                 print(f"  _get_ax_attribute({attribute}) exception: {e}")
         return None
     
+    def _get_primary_screen_height(self) -> float:
+        """Get the height of the primary display (the one at origin 0,0).
+        
+        IMPORTANT: Do NOT use NSScreen.mainScreen() - it returns the screen with
+        keyboard focus, not the primary display. This causes coordinate mismatches
+        when working across multiple monitors.
+        """
+        for screen in NSScreen.screens():
+            frame = screen.frame()
+            if frame.origin.x == 0 and frame.origin.y == 0:
+                return frame.size.height
+        
+        # Fallback to first screen if no screen at origin (shouldn't happen)
+        screens = NSScreen.screens()
+        if screens:
+            return screens[0].frame().size.height
+        return 1080  # Ultimate fallback
+    
     def _flip_y(self, y: float) -> float:
-        """Convert from NSScreen coordinates (bottom-left origin) to CGWindow coordinates (top-left origin)."""
-        main_screen = NSScreen.mainScreen()
-        if main_screen:
-            return main_screen.frame().size.height - y
-        return y
+        """Convert from NSScreen coordinates (bottom-left origin) to CGWindow coordinates (top-left origin).
+        
+        Uses the PRIMARY display height (the one at origin 0,0), not mainScreen() which
+        can change based on keyboard focus.
+        """
+        return self._get_primary_screen_height() - y
     
     def _update_overlays(self):
         """Request redraw of all overlay views."""
@@ -849,6 +875,8 @@ class ScreenshotApp:
     
     def _capture_region(self, x: float, y: float, width: float, height: float, window_id: int = 0):
         """Capture a screen region and copy to clipboard (or start recording in record mode)."""
+        print(f"_capture_region called: x={x}, y={y}, width={width}, height={height}, window_id={window_id}")
+        
         # If in recording mode, delegate to recording handler
         if self.record_mode:
             self._handle_recording_capture(x, y, width, height)
@@ -863,8 +891,9 @@ class ScreenshotApp:
             NSDate.dateWithTimeIntervalSinceNow_(0.1)
         )
         
-        # Capture the region
+        # Capture the region using CGWindow coordinates (top-left origin)
         rect = CGRectMake(x, y, width, height)
+        print(f"CGRectMake: ({x}, {y}, {width}, {height})")
         
         if window_id:
             # Capture specific window only (not what's behind it)
@@ -1230,13 +1259,12 @@ class ScreenshotApp:
         Returns (screen_index, screen_origin_x, screen_origin_y, scale_factor) or None.
         """
         screens = NSScreen.screens()
-        main_screen = NSScreen.mainScreen()
-        main_frame = main_screen.frame()
+        primary_height = self._get_primary_screen_height()
         
         for idx, screen in enumerate(screens):
             frame = screen.frame()
             # NSScreen uses bottom-left origin, convert to top-left for comparison
-            screen_y_top = main_frame.size.height - frame.origin.y - frame.size.height
+            screen_y_top = primary_height - frame.origin.y - frame.size.height
             
             # Check if point is within this screen (with some tolerance)
             if (frame.origin.x <= x < frame.origin.x + frame.size.width and
@@ -1246,9 +1274,10 @@ class ScreenshotApp:
                 print(f"Point ({x}, {y}) is on screen {idx}: origin=({frame.origin.x}, {screen_y_top}), size={frame.size.width}x{frame.size.height}, scale={scale}")
                 return (idx, frame.origin.x, screen_y_top, scale)
         
-        # Default to main screen
-        print(f"Point ({x}, {y}) not found on any screen, using main screen")
-        return (0, 0.0, 0.0, main_screen.backingScaleFactor())
+        # Default to primary screen
+        print(f"Point ({x}, {y}) not found on any screen, using primary screen")
+        primary_scale = screens[0].backingScaleFactor() if screens else 1.0
+        return (0, 0.0, 0.0, primary_scale)
     
     def _start_recording(self, x: float, y: float, width: float, height: float):
         """Start screen recording of the specified region using macOS screencapture."""
@@ -1562,13 +1591,31 @@ class ScreenshotApp:
         """Create a simple outline window to show the recording region.
         
         The border is drawn OUTSIDE the recording region so it doesn't appear in the capture.
-        """
-        # Get main screen for coordinate conversion
-        main_screen = NSScreen.mainScreen()
-        screen_height = main_screen.frame().size.height
         
-        # Convert from top-left (CGWindow) to bottom-left (NSWindow) coordinates
-        ns_y = screen_height - y - height
+        Args:
+            x, y: Top-left corner in CGWindow coordinates (origin at top-left of primary display)
+            width, height: Size of the region
+        """
+        # Get PRIMARY screen height for coordinate conversion
+        # CGWindow uses top-left origin, NSWindow uses bottom-left origin
+        # Must use primary display (at origin 0,0), not mainScreen() which changes with focus
+        main_height = 0
+        for screen in NSScreen.screens():
+            frame = screen.frame()
+            if frame.origin.x == 0 and frame.origin.y == 0:
+                main_height = frame.size.height
+                break
+        if main_height == 0:
+            main_height = NSScreen.screens()[0].frame().size.height
+        
+        # Convert from CGWindow coords (top-left origin) to NSWindow coords (bottom-left origin)
+        # NSWindow y = main_screen_height - CGWindow_y - rect_height
+        ns_x = x
+        ns_y = main_height - y - height
+        
+        if self._debug:
+            print(f"Recording outline: CGWindow({x}, {y}, {width}, {height}) -> NSWindow({ns_x}, {ns_y})")
+            print(f"  main_height={main_height}")
         
         # Border thickness and padding - border will be drawn entirely OUTSIDE the recording region
         border_width = 3.0
@@ -1576,7 +1623,7 @@ class ScreenshotApp:
         
         # Create a borderless window for the outline
         # Window extends 'padding' pixels outside the recording region on each side
-        frame = NSMakeRect(x - padding, ns_y - padding, width + padding * 2, height + padding * 2)
+        frame = NSMakeRect(ns_x - padding, ns_y - padding, width + padding * 2, height + padding * 2)
         
         outline_window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             frame,
@@ -1673,6 +1720,8 @@ class ScreenshotApp:
     
     def _handle_recording_capture(self, x: float, y: float, width: float, height: float):
         """Handle capture in recording mode - start recording instead of screenshot."""
+        print(f"Recording capture region: x={x}, y={y}, width={width}, height={height}")
+        
         # Hide selection overlays
         for window in self.overlay_windows:
             window.orderOut_(None)
@@ -1956,9 +2005,8 @@ class OverlayView(NSView):
         wx, wy, ww, wh = window.bounds
         
         # Convert coordinates (CGWindow uses top-left, NSView uses bottom-left)
-        # Need to use main screen height for proper multi-monitor conversion
-        main_screen = NSScreen.mainScreen()
-        main_height = main_screen.frame().size.height
+        # Need to use PRIMARY screen height for proper multi-monitor conversion
+        main_height = self.app._get_primary_screen_height()
         
         view_x = wx - screen_frame.origin.x
         view_y = main_height - wy - wh - screen_frame.origin.y
@@ -1989,9 +2037,8 @@ class OverlayView(NSView):
         ex, ey, ew, eh = element.bounds
         
         # Convert coordinates (Accessibility uses top-left, NSView uses bottom-left)
-        # Need to use main screen height for proper multi-monitor conversion
-        main_screen = NSScreen.mainScreen()
-        main_height = main_screen.frame().size.height
+        # Need to use PRIMARY screen height for proper multi-monitor conversion
+        main_height = self.app._get_primary_screen_height()
         
         view_x = ex - screen_frame.origin.x
         view_y = main_height - ey - eh - screen_frame.origin.y
@@ -2022,9 +2069,8 @@ class OverlayView(NSView):
         x1, y1 = self.app.drag_start
         x2, y2 = self.app.drag_current
         
-        # Get main screen height for coordinate conversion
-        main_screen = NSScreen.mainScreen()
-        main_height = main_screen.frame().size.height
+        # Get PRIMARY screen height for coordinate conversion
+        main_height = self.app._get_primary_screen_height()
         
         # Calculate bounds
         width = abs(x2 - x1)
