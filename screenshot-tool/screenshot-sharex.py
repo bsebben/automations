@@ -916,7 +916,10 @@ class ScreenshotApp:
                     if self.save_to_disk and self.annotate:
                         saved_path = self._save_from_clipboard()
 
-                    self._copy_to_clipboard(temp_path)
+                    # Only copy to clipboard if NOT annotating
+                    # (Shottr already puts the annotated image on clipboard)
+                    if not self.annotate:
+                        self._copy_to_clipboard(temp_path)
 
                     # Play capture sound
                     play_capture_sound()
