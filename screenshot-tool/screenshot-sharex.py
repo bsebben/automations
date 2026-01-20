@@ -1502,6 +1502,14 @@ def check_shift_pressed() -> bool:
     return (flags & kCGEventFlagMaskShift) != 0
 
 
+def open_screenshots_dir():
+    """Open the screenshots directory in Finder."""
+    screenshots_dir = get_screenshots_dir()
+    print(f"Opening: {screenshots_dir}")
+    subprocess.run(['open', screenshots_dir])
+    sys.exit(0)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="ShareX-like screenshot tool for macOS",
@@ -1519,6 +1527,7 @@ Examples:
   %(prog)s --annotate       Annotate screenshot and save to disk
   %(prog)s --no-save        Take screenshot for clipboard only
   %(prog)s --record         Record screen region to GIF
+  %(prog)s --open-dir       Open screenshots folder in Finder
   %(prog)s --install        Install required dependencies
         """
     )
@@ -1553,9 +1562,18 @@ Examples:
         action='store_true',
         help='Record screen region to GIF instead of taking screenshot'
     )
+    parser.add_argument(
+        '--open-dir', '-o',
+        action='store_true',
+        help='Open the screenshots folder in Finder and exit'
+    )
     
     args = parser.parse_args()
     
+    # Handle --open-dir: open screenshots folder and exit
+    if args.open_dir:
+        open_screenshots_dir()
+
     # Check accessibility permissions
     if not check_accessibility_permissions():
         print("\n❌ Cannot run without accessibility permissions.")

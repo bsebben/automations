@@ -8,6 +8,7 @@
 #   ./screenshot-annotate.sh --annotate   - Annotate screenshot and save to disk
 #   ./screenshot-annotate.sh --no-save    - Take screenshot for clipboard only
 #   ./screenshot-annotate.sh --record     - Record screen region to GIF
+#   ./screenshot-annotate.sh --open-dir   - Open screenshots folder in Finder
 #
 # For hotkey setup, create an Automator Quick Action or use Hammerspoon/Raycast.
 
@@ -30,6 +31,7 @@ ANNOTATE_MODE=false
 INSTALL_MODE=false
 NO_SAVE_MODE=false
 RECORD_MODE=false
+OPEN_DIR=false
 TIMEOUT=30
 
 # Parse arguments
@@ -47,6 +49,10 @@ while [[ $# -gt 0 ]]; do
             RECORD_MODE=true
             shift
             ;;
+        --open-dir|-o)
+            OPEN_DIR=true
+            shift
+            ;;
         --install|-i)
             INSTALL_MODE=true
             shift
@@ -62,6 +68,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --annotate, -a       Open screenshot in Shottr for annotation before copying"
             echo "  --no-save            Do not save screenshot to disk (clipboard only)"
             echo "  --record, -r         Record screen region to GIF"
+            echo "  --open-dir, -o       Open screenshots folder in Finder and exit"
             echo "  --timeout, -t SECS   Timeout in seconds (default: 30, 0 = no timeout)"
             echo "  --install, -i        Install Python dependencies"
             echo "  --help, -h           Show this help message"
@@ -91,6 +98,11 @@ fi
 # Install mode
 if [[ "$INSTALL_MODE" == true ]]; then
     exec "$PYTHON" "$SHAREX_SCRIPT" --install
+fi
+
+# Open screenshots folder mode (doesn't need full dependencies)
+if [[ "$OPEN_DIR" == true ]]; then
+    exec "$PYTHON" "$SHAREX_SCRIPT" --open-dir
 fi
 
 # Check for required Python modules - if missing, the Python script will prompt to install
