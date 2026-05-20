@@ -17,14 +17,45 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SHAREX_SCRIPT="${SCRIPT_DIR}/screenshot-sharex.py"
 
-# Use mise-managed Python (dynamically resolved for Alfred/Karabiner compatibility)
-MISE="/opt/homebrew/bin/mise"
-if [[ -x "$MISE" ]]; then
-    PYTHON="$("$MISE" which python3 2>/dev/null)"
+LOCKFILE="/tmp/screenshot-tool.lock"
+PYTHON_CACHE="/tmp/screenshot-tool-python-path"
+DEPS_MARKER="/tmp/screenshot-tool-deps-ok"
+
+# --- Concurrency guard (atomic via symlink) ---
+# ln -s is a single syscall: creates the file and stores the PID in one step
+_log="/tmp/screenshot-tool-debug.log"
+cleanup() { rm -f "$LOCKFILE"; }
+echo "$(date +%T) $$ lock-attempt" >> "$_log"
+if ! ln -s $$ "$LOCKFILE" 2>/dev/null; then
+    existing_pid=$(readlink "$LOCKFILE" 2>/dev/null)
+    echo "$(date +%T) $$ lock-held by=$existing_pid alive=$(kill -0 "$existing_pid" 2>/dev/null && echo y || echo n)" >> "$_log"
+    if [[ -n "$existing_pid" ]] && kill -0 "$existing_pid" 2>/dev/null; then
+        echo "$(date +%T) $$ blocked" >> "$_log"
+        exit 0
+    fi
+    rm -f "$LOCKFILE"
+    if ! ln -s $$ "$LOCKFILE" 2>/dev/null; then
+        echo "$(date +%T) $$ lost-race" >> "$_log"
+        exit 0
+    fi
+    echo "$(date +%T) $$ reclaimed" >> "$_log"
 fi
-# Fall back to system python3 if mise isn't available or didn't return a path
+echo "$(date +%T) $$ got-lock" >> "$_log"
+trap cleanup EXIT
+
+# --- Resolve Python path (cached) ---
+if [[ -f "$PYTHON_CACHE" ]]; then
+    PYTHON=$(<"$PYTHON_CACHE")
+fi
 if [[ -z "$PYTHON" || ! -x "$PYTHON" ]]; then
-    PYTHON="python3"
+    MISE="/opt/homebrew/bin/mise"
+    if [[ -x "$MISE" ]]; then
+        PYTHON="$("$MISE" which python3 2>/dev/null)"
+    fi
+    if [[ -z "$PYTHON" || ! -x "$PYTHON" ]]; then
+        PYTHON="python3"
+    fi
+    echo "$PYTHON" > "$PYTHON_CACHE"
 fi
 
 ANNOTATE_MODE=false
@@ -95,8 +126,9 @@ if [[ ! -f "$SHAREX_SCRIPT" ]]; then
     exit 1
 fi
 
-# Install mode
+# Install mode (clear deps marker so next run re-checks)
 if [[ "$INSTALL_MODE" == true ]]; then
+    rm -f "$DEPS_MARKER"
     exec "$PYTHON" "$SHAREX_SCRIPT" --install
 fi
 
@@ -105,10 +137,13 @@ if [[ "$OPEN_DIR" == true ]]; then
     exec "$PYTHON" "$SHAREX_SCRIPT" --open-dir
 fi
 
-# Check for required Python modules - if missing, the Python script will prompt to install
-if ! "$PYTHON" -c "import objc, Quartz, AppKit" 2>/dev/null; then
-    echo "Dependencies not installed. Running setup..."
-    exec "$PYTHON" "$SHAREX_SCRIPT"
+# Check for required Python modules (cached after first success)
+if [[ ! -f "$DEPS_MARKER" ]]; then
+    if ! "$PYTHON" -c "import objc, Quartz, AppKit" 2>/dev/null; then
+        echo "Dependencies not installed. Running setup..."
+        exec "$PYTHON" "$SHAREX_SCRIPT"
+    fi
+    touch "$DEPS_MARKER"
 fi
 
 # Build arguments and run
@@ -126,4 +161,4 @@ if [[ "$ANNOTATE_MODE" == false && "$NO_SAVE_MODE" == false && "$RECORD_MODE" ==
     ARGS="$ARGS --check-shift"
 fi
 
-exec "$PYTHON" "$SHAREX_SCRIPT" $ARGS
+"$PYTHON" "$SHAREX_SCRIPT" $ARGS
