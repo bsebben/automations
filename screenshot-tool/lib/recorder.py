@@ -360,11 +360,42 @@ class ScreenRecorder:
         """Signal that recording should stop (save, not cancel)."""
         self._is_recording = False
     
+    @staticmethod
+    def _check_ffmpeg() -> Optional[str]:
+        """Verify ffmpeg is installed and loadable. Returns an error message or None."""
+        import shutil
+        ffmpeg_path = shutil.which("ffmpeg")
+        if not ffmpeg_path:
+            return "ffmpeg not found. Install with: brew install ffmpeg"
+        try:
+            result = subprocess.run(
+                ["ffmpeg", "-version"],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode != 0:
+                stderr = result.stderr.strip()
+                if "Library not loaded" in stderr or "dylib" in stderr:
+                    return f"ffmpeg has broken library links. Fix with: brew reinstall ffmpeg\n{stderr[:300]}"
+                return f"ffmpeg failed: {stderr[:300]}"
+        except subprocess.TimeoutExpired:
+            return "ffmpeg timed out during version check"
+        except OSError as e:
+            if "dylib" in str(e) or "Library not loaded" in str(e):
+                return f"ffmpeg has broken library links. Fix with: brew reinstall ffmpeg\n{e}"
+            return f"ffmpeg could not be launched: {e}"
+        return None
+
     def _convert_to_gif(self) -> Optional[str]:
         """Convert the recorded video to GIF."""
         if not self._temp_file or not os.path.exists(self._temp_file):
             return None
-        
+
+        ffmpeg_error = self._check_ffmpeg()
+        if ffmpeg_error:
+            print(f"✗ {ffmpeg_error}")
+            show_notification(f"GIF conversion failed: ffmpeg broken. Run 'brew reinstall ffmpeg'")
+            return None
+
         print("Converting to GIF...")
         
         # Generate output path
@@ -433,8 +464,14 @@ class ScreenRecorder:
             return gif_path
             
         except subprocess.CalledProcessError as e:
-            print(f"✗ GIF conversion failed: {e}")
-            show_notification("GIF conversion failed")
+            stderr = getattr(e, 'stderr', '') or ''
+            if "Library not loaded" in stderr or "dylib" in stderr:
+                hint = "Fix with: brew reinstall ffmpeg"
+                print(f"✗ GIF conversion failed (broken ffmpeg libraries). {hint}")
+                show_notification(f"GIF failed: ffmpeg broken. Run 'brew reinstall ffmpeg'")
+            else:
+                print(f"✗ GIF conversion failed: {e}")
+                show_notification("GIF conversion failed - check terminal for details")
             return None
     
     def _copy_to_clipboard(self, gif_path: str) -> bool:
