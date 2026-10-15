@@ -44,13 +44,16 @@ echo "$(date +%T) $$ got-lock" >> "$_log"
 trap cleanup EXIT
 
 # --- Resolve Python path (cached) ---
-if [[ -f "$PYTHON_CACHE" ]]; then
+VENV_PYTHON="${SCRIPT_DIR}/.venv/bin/python3"
+if [[ -x "$VENV_PYTHON" ]]; then
+    PYTHON="$VENV_PYTHON"
+elif [[ -f "$PYTHON_CACHE" ]]; then
     PYTHON=$(<"$PYTHON_CACHE")
 fi
 if [[ -z "$PYTHON" || ! -x "$PYTHON" ]]; then
     MISE="/opt/homebrew/bin/mise"
     if [[ -x "$MISE" ]]; then
-        PYTHON="$("$MISE" which python3 2>/dev/null)"
+        PYTHON="$("$MISE" which python3 2>/dev/null || true)"
     fi
     if [[ -z "$PYTHON" || ! -x "$PYTHON" ]]; then
         PYTHON="python3"
