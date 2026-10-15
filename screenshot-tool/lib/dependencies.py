@@ -12,6 +12,7 @@ REQUIRED_PACKAGES = [
     "pyobjc-core",
     "pyobjc-framework-Quartz",
     "pyobjc-framework-Cocoa",
+    "pyobjc-framework-ApplicationServices",
 ]
 
 
